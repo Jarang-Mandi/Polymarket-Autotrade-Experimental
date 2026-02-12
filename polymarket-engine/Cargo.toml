@@ -1,0 +1,53 @@
+[package]
+name = "polymarket-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Autonomous Polymarket trading execution engine for OpenClaw AI Agent"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Ethereum / signing
+ethers = { version = "2", features = ["legacy"] }
+ethers-signers = "2"
+
+# WebSocket for dashboard
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+
+# Web server for dashboard API
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Config
+dotenv = "0.15"
+
+# Crypto
+sha3 = "0.10"
+hex = "0.4"
+
+# UUID
+uuid = { version = "1", features = ["v4"] }
+
+# Anyhow for error handling
+anyhow = "1"
+thiserror = "1"
+
+# SQLite persistence
+rusqlite = { version = "0.31", features = ["bundled", "chrono"] }

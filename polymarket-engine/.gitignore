@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# Environment
+.env
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
