@@ -28,6 +28,11 @@ pub struct EngineState {
     pub last_scan: Option<chrono::DateTime<Utc>>,
     pub last_command: Option<chrono::DateTime<Utc>>,
     pub errors: Vec<String>,
+    // Arbitrage
+    pub arb_opportunities: Vec<ArbitrageOpportunity>,
+    pub arb_config: ArbConfig,
+    pub arb_stats: ArbStats,
+    pub active_arb_count: usize,
 }
 
 impl TradingEngine {
@@ -91,6 +96,10 @@ impl TradingEngine {
             last_scan: None,
             last_command: None,
             errors: vec![],
+            arb_opportunities: vec![],
+            arb_config: ArbConfig::default(),
+            arb_stats: ArbStats::default(),
+            active_arb_count: 0,
         };
 
         Self {
@@ -142,10 +151,11 @@ impl TradingEngine {
             }
         });
 
-        // Main loop: scan markets + update positions + periodic DB snapshot
+        // Main loop: scan markets + update positions + arb scan + periodic DB snapshot
         let mut scan_tick = time::interval(scan_interval);
         let mut position_tick = time::interval(position_interval);
         let mut snapshot_tick = time::interval(Duration::from_secs(3600)); // hourly
+        let mut arb_tick = time::interval(Duration::from_secs(60));       // arb scan every 60s
 
         loop {
             tokio::select! {
@@ -154,6 +164,9 @@ impl TradingEngine {
                 }
                 _ = position_tick.tick() => {
                     self.update_positions().await;
+                }
+                _ = arb_tick.tick() => {
+                    self.arb_scan_cycle().await;
                 }
                 _ = snapshot_tick.tick() => {
                     let state = self.state.read().await;
@@ -457,6 +470,548 @@ impl TradingEngine {
             state.errors.drain(0..1);
         }
         Ok(())
+    }
+
+    // ═══════════════════════════════════════════
+    // ARBITRAGE SCANNER (background loop)
+    // ═══════════════════════════════════════════
+
+    /// Full arb scan cycle — runs every 60s.
+    /// Scans binary markets for YES+NO < $1, multi-outcome events, and wide spreads.
+    async fn arb_scan_cycle(&self) {
+        let arb_enabled = {
+            let state = self.state.read().await;
+            state.arb_config.enabled
+        };
+        if !arb_enabled {
+            return;
+        }
+
+        info!("--- ARB SCAN ---");
+        let mut opportunities: Vec<ArbitrageOpportunity> = vec![];
+
+        // 1. Binary market arb scan
+        match self.scan_binary_arbs().await {
+            Ok(mut arbs) => {
+                info!("Binary arb scan: {} opportunities", arbs.len());
+                opportunities.append(&mut arbs);
+            }
+            Err(e) => {
+                warn!("Binary arb scan failed: {}", e);
+            }
+        }
+
+        // 2. Multi-outcome neg-risk arb scan
+        match self.scan_multi_outcome_arbs().await {
+            Ok(mut arbs) => {
+                info!("Multi-outcome arb scan: {} opportunities", arbs.len());
+                opportunities.append(&mut arbs);
+            }
+            Err(e) => {
+                warn!("Multi-outcome arb scan failed: {}", e);
+            }
+        }
+
+        // 3. Spread capture scan
+        match self.scan_spread_capture().await {
+            Ok(mut arbs) => {
+                info!("Spread capture scan: {} opportunities", arbs.len());
+                opportunities.append(&mut arbs);
+            }
+            Err(e) => {
+                warn!("Spread capture scan failed: {}", e);
+            }
+        }
+
+        // Sort by profit_pct * liquidity_score (best first)
+        opportunities.sort_by(|a, b| {
+            let score_a = a.profit_pct * a.liquidity_score;
+            let score_b = b.profit_pct * b.liquidity_score;
+            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Keep top 20
+        opportunities.truncate(20);
+
+        let found_count = opportunities.len() as u64;
+
+        let mut state = self.state.write().await;
+        state.arb_opportunities = opportunities;
+        state.arb_stats.last_scan_at = Some(Utc::now());
+        state.arb_stats.opportunities_found += found_count;
+
+        let market_count = state.cached_markets.len() as u64;
+        state.arb_stats.markets_scanned += market_count;
+
+        if found_count > 0 {
+            info!("ARB SCAN COMPLETE: {} opportunities detected", found_count);
+        }
+    }
+
+    /// Scan all cached binary markets for YES_ask + NO_ask < $1.00
+    async fn scan_binary_arbs(&self) -> EngineResult<Vec<ArbitrageOpportunity>> {
+        let (markets, config) = {
+            let state = self.state.read().await;
+            let markets: Vec<Market> = state.cached_markets
+                .iter()
+                .filter(|m| {
+                    // Only binary markets (not neg-risk multi-outcome)
+                    !m.neg_risk.unwrap_or(false)
+                        && m.enable_order_book.unwrap_or(false)
+                        && m.clob_token_ids.is_some()
+                        && m.liquidity.unwrap_or(0.0) >= state.arb_config.min_liquidity
+                })
+                .cloned()
+                .collect();
+            let config = state.arb_config.clone();
+            (markets, config)
+        };
+
+        let mut arbs = vec![];
+
+        for market in &markets {
+            let (yes_id, no_id) = match market.token_ids() {
+                Some(ids) => ids,
+                None => continue,
+            };
+
+            // Try to get real orderbook prices
+            let (yes_ask, no_ask) = match self.polymarket.get_binary_prices(&yes_id, &no_id).await {
+                Ok(prices) => prices,
+                Err(_) => continue, // Skip markets with no orderbook depth
+            };
+
+            let total_cost = yes_ask + no_ask;
+            let profit_per_unit = 1.0 - total_cost;
+            let profit_pct = (profit_per_unit / total_cost) * 100.0;
+
+            if profit_pct >= config.min_profit_pct {
+                let question = market.question.clone().unwrap_or_else(|| market.id.clone());
+                let liquidity = market.liquidity.unwrap_or(0.0);
+
+                let opp = ArbitrageOpportunity {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    arb_type: ArbitrageType::BinaryMispricing,
+                    legs: vec![
+                        ArbLeg {
+                            market_id: market.id.clone(),
+                            market_question: question.clone(),
+                            token_id: yes_id.clone(),
+                            side: Side::Buy,
+                            price: yes_ask,
+                            size: 1.0, // normalized; actual size calculated at execution
+                            neg_risk: false,
+                        },
+                        ArbLeg {
+                            market_id: market.id.clone(),
+                            market_question: question,
+                            token_id: no_id.clone(),
+                            side: Side::Buy,
+                            price: no_ask,
+                            size: 1.0,
+                            neg_risk: false,
+                        },
+                    ],
+                    total_cost,
+                    guaranteed_payout: 1.0,
+                    profit: profit_per_unit,
+                    profit_pct,
+                    liquidity_score: (liquidity / 10_000.0).min(10.0),
+                    detected_at: Utc::now(),
+                    status: ArbStatus::Detected,
+                    event_slug: None,
+                };
+
+                info!(
+                    "BINARY ARB DETECTED: {} | YES={:.3} + NO={:.3} = {:.3} | profit={:.2}%",
+                    market.id, yes_ask, no_ask, total_cost, profit_pct
+                );
+
+                arbs.push(opp);
+            }
+        }
+
+        Ok(arbs)
+    }
+
+    /// Scan neg-risk multi-outcome events for sum(YES asks) < $1.00
+    async fn scan_multi_outcome_arbs(&self) -> EngineResult<Vec<ArbitrageOpportunity>> {
+        let config = {
+            let state = self.state.read().await;
+            state.arb_config.clone()
+        };
+
+        // Fetch neg-risk events from Gamma
+        let events = match self.polymarket.get_neg_risk_events(50).await {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("Failed to fetch neg-risk events: {}", e);
+                return Ok(vec![]);
+            }
+        };
+
+        let mut arbs = vec![];
+
+        for event in &events {
+            let slug = event["slug"].as_str().unwrap_or("");
+            let title = event["title"].as_str().unwrap_or(slug);
+            let markets_raw = match event["markets"].as_array() {
+                Some(m) => m,
+                None => continue,
+            };
+
+            if markets_raw.len() < 2 || markets_raw.len() > 8 {
+                continue; // Skip too few or too many outcomes
+            }
+
+            // Parse markets and get YES ask for each
+            let mut legs: Vec<ArbLeg> = vec![];
+            let mut sum_yes_asks = 0.0;
+            let mut min_liquidity_leg = f64::MAX;
+            let mut all_ok = true;
+
+            for m_raw in markets_raw {
+                let market = match crate::polymarket::parse_market(m_raw) {
+                    Ok(m) => m,
+                    Err(_) => { all_ok = false; break; }
+                };
+
+                if !market.enable_order_book.unwrap_or(false) {
+                    all_ok = false;
+                    break;
+                }
+
+                let (yes_id, _no_id) = match market.token_ids() {
+                    Some(ids) => ids,
+                    None => { all_ok = false; break; }
+                };
+
+                // Get actual orderbook ask price
+                let (ask_price, _depth) = match self.polymarket.get_ask_depth(&yes_id).await {
+                    Ok(d) => d,
+                    Err(_) => { all_ok = false; break; }
+                };
+
+                let liq = market.liquidity.unwrap_or(0.0);
+                if liq < config.min_liquidity {
+                    all_ok = false;
+                    break;
+                }
+                min_liquidity_leg = min_liquidity_leg.min(liq);
+
+                sum_yes_asks += ask_price;
+
+                legs.push(ArbLeg {
+                    market_id: market.id.clone(),
+                    market_question: market.question.clone().unwrap_or_default(),
+                    token_id: yes_id,
+                    side: Side::Buy,
+                    price: ask_price,
+                    size: 1.0,
+                    neg_risk: true,
+                });
+            }
+
+            if !all_ok || legs.len() < 2 {
+                continue;
+            }
+
+            // Check for under-priced arb: sum < 1.00
+            let profit_per_unit = 1.0 - sum_yes_asks;
+            let profit_pct = if sum_yes_asks > 0.0 {
+                (profit_per_unit / sum_yes_asks) * 100.0
+            } else {
+                0.0
+            };
+
+            if profit_pct >= config.min_profit_pct && sum_yes_asks < 1.0 {
+                info!(
+                    "MULTI-OUTCOME ARB DETECTED: '{}' | {} markets | sum={:.4} | profit={:.2}%",
+                    title, legs.len(), sum_yes_asks, profit_pct
+                );
+
+                arbs.push(ArbitrageOpportunity {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    arb_type: ArbitrageType::MultiOutcomeUnderpriced,
+                    legs,
+                    total_cost: sum_yes_asks,
+                    guaranteed_payout: 1.0,
+                    profit: profit_per_unit,
+                    profit_pct,
+                    liquidity_score: (min_liquidity_leg / 10_000.0).min(10.0),
+                    detected_at: Utc::now(),
+                    status: ArbStatus::Detected,
+                    event_slug: Some(slug.to_string()),
+                });
+            }
+
+            // TODO: Check for over-priced arb (sum of bids > 1.00) — requires selling YES.
+            // Selling requires existing inventory or margin, so skipped for $50 bankroll.
+        }
+
+        Ok(arbs)
+    }
+
+    /// Scan liquid markets for wide bid-ask spreads (market-making lite)
+    async fn scan_spread_capture(&self) -> EngineResult<Vec<ArbitrageOpportunity>> {
+        let (markets, config) = {
+            let state = self.state.read().await;
+            let markets: Vec<Market> = state.cached_markets
+                .iter()
+                .filter(|m| {
+                    m.enable_order_book.unwrap_or(false)
+                        && m.volume_24hr.unwrap_or(0.0) >= state.arb_config.min_volume_24h_spread
+                        && m.clob_token_ids.is_some()
+                })
+                .cloned()
+                .collect();
+            let config = state.arb_config.clone();
+            (markets, config)
+        };
+
+        let mut arbs = vec![];
+
+        for market in &markets {
+            let (yes_id, _no_id) = match market.token_ids() {
+                Some(ids) => ids,
+                None => continue,
+            };
+
+            // Get actual spread from orderbook
+            let (bid, ask) = match self.polymarket.get_spread(&yes_id).await {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            let spread = ask - bid;
+
+            if spread >= config.min_spread {
+                let buy_price = bid + 0.01;  // improve bid by 1 tick
+                let sell_price = ask - 0.01; // improve ask by 1 tick
+                let expected_profit = sell_price - buy_price;
+                let profit_pct = if buy_price > 0.0 {
+                    (expected_profit / buy_price) * 100.0
+                } else {
+                    0.0
+                };
+
+                if profit_pct > 0.5 {
+                    let question = market.question.clone().unwrap_or_else(|| market.id.clone());
+                    let volume = market.volume_24hr.unwrap_or(0.0);
+
+                    arbs.push(ArbitrageOpportunity {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        arb_type: ArbitrageType::SpreadCapture,
+                        legs: vec![
+                            ArbLeg {
+                                market_id: market.id.clone(),
+                                market_question: question.clone(),
+                                token_id: yes_id.clone(),
+                                side: Side::Buy,
+                                price: buy_price,
+                                size: 1.0,
+                                neg_risk: market.neg_risk.unwrap_or(false),
+                            },
+                            ArbLeg {
+                                market_id: market.id.clone(),
+                                market_question: question,
+                                token_id: yes_id.clone(),
+                                side: Side::Sell,
+                                price: sell_price,
+                                size: 1.0,
+                                neg_risk: market.neg_risk.unwrap_or(false),
+                            },
+                        ],
+                        total_cost: buy_price,
+                        guaranteed_payout: sell_price,
+                        profit: expected_profit,
+                        profit_pct,
+                        liquidity_score: (volume / 100_000.0).min(10.0),
+                        detected_at: Utc::now(),
+                        status: ArbStatus::Detected,
+                        event_slug: None,
+                    });
+                }
+            }
+        }
+
+        Ok(arbs)
+    }
+
+    /// Execute a detected arbitrage opportunity.
+    /// Places orders for all legs and tracks execution.
+    pub async fn handle_execute_arb(&self, cmd: ExecuteArbCommand) -> EngineResult<ArbExecutionResponse> {
+        info!("ARB EXECUTE: {}", cmd.opportunity_id);
+
+        let (opp, config) = {
+            let state = self.state.read().await;
+
+            let opp = state.arb_opportunities
+                .iter()
+                .find(|o| o.id == cmd.opportunity_id)
+                .cloned()
+                .ok_or_else(|| EngineError::BadRequest(
+                    format!("Arb opportunity {} not found", cmd.opportunity_id)
+                ))?;
+
+            if state.active_arb_count >= state.arb_config.max_concurrent_arbs {
+                return Err(EngineError::BadRequest(
+                    format!("Max concurrent arbs ({}) reached", state.arb_config.max_concurrent_arbs)
+                ));
+            }
+
+            (opp, state.arb_config.clone())
+        };
+
+        // Calculate actual size based on bankroll and config
+        let capital = {
+            let state = self.state.read().await;
+            state.portfolio.capital
+        };
+
+        let max_affordable = capital * 0.8; // never use more than 80% of capital
+        let unit_cost = opp.total_cost;
+        if unit_cost <= 0.0 {
+            return Err(EngineError::BadRequest("Invalid arb cost".into()));
+        }
+
+        let max_units = (max_affordable / unit_cost).floor().min(config.max_arb_size / unit_cost);
+        let actual_units = cmd.size_override
+            .map(|s| s.min(max_units).max(1.0))
+            .unwrap_or_else(|| max_units.min(5.0).max(1.0)); // default: up to $5 worth
+
+        let total_cost = actual_units * unit_cost;
+        let expected_profit = actual_units * opp.profit;
+
+        if total_cost > capital * 0.95 {
+            return Err(EngineError::InsufficientCapital {
+                cost: total_cost,
+                capital,
+                pct: 95.0,
+            });
+        }
+
+        // Execute each leg
+        let mut legs_filled = 0;
+        let mut trade_ids = vec![];
+
+        for leg in &opp.legs {
+            let tick_size = "0.01".to_string(); // default tick
+
+            let order = OrderRequest {
+                token_id: leg.token_id.clone(),
+                price: leg.price,
+                size: actual_units * leg.size,
+                side: leg.side,
+                order_type: OrderType::GTC,
+                neg_risk: leg.neg_risk,
+                tick_size,
+            };
+
+            match self.polymarket.place_order(&order).await {
+                Ok(resp) if resp.success => {
+                    legs_filled += 1;
+                    if let Some(oid) = resp.order_id {
+                        trade_ids.push(oid);
+                    }
+
+                    // Log as trade
+                    let trade = TradeLog::new(
+                        &leg.market_id,
+                        &leg.market_question,
+                        leg.side,
+                        leg.price,
+                        actual_units * leg.size,
+                        &format!("arb:{}", opp.arb_type.label()),
+                        opp.profit_pct / 100.0,
+                        1.0, // high confidence for arb
+                        0.0,
+                    );
+                    if let Err(e) = self.db.insert_trade(&trade) {
+                        warn!("DB insert_trade (arb leg) failed: {}", e);
+                    }
+
+                    let mut state = self.state.write().await;
+                    state.portfolio.recent_trades.push(trade);
+                    state.portfolio.total_trades += 1;
+                    state.portfolio.last_trade_at = Some(Utc::now());
+                }
+                Ok(resp) => {
+                    let msg = resp.error_msg.unwrap_or_else(|| "rejected".into());
+                    warn!("Arb leg failed for {}: {}", leg.market_id, msg);
+                }
+                Err(e) => {
+                    warn!("Arb leg order failed: {}", e);
+                }
+            }
+        }
+
+        let all_filled = legs_filled == opp.legs.len();
+
+        // Update capital and stats
+        {
+            let mut state = self.state.write().await;
+            if all_filled {
+                state.portfolio.capital -= total_cost;
+                state.arb_stats.opportunities_executed += 1;
+                state.arb_stats.total_profit += expected_profit;
+                state.active_arb_count += 1;
+
+                // Update avg profit pct
+                if state.arb_stats.opportunities_executed > 0 {
+                    state.arb_stats.avg_profit_pct =
+                        state.arb_stats.total_profit / state.arb_stats.opportunities_executed as f64;
+                }
+
+                // Mark opportunity as executing
+                if let Some(o) = state.arb_opportunities.iter_mut().find(|o| o.id == cmd.opportunity_id) {
+                    o.status = ArbStatus::Filled;
+                }
+            } else if legs_filled > 0 {
+                state.arb_stats.partial_fills += 1;
+                // Partial fill — capital deducted for filled legs only
+                let filled_cost = (legs_filled as f64 / opp.legs.len() as f64) * total_cost;
+                state.portfolio.capital -= filled_cost;
+
+                if let Some(o) = state.arb_opportunities.iter_mut().find(|o| o.id == cmd.opportunity_id) {
+                    o.status = ArbStatus::PartialFill;
+                }
+            } else {
+                if let Some(o) = state.arb_opportunities.iter_mut().find(|o| o.id == cmd.opportunity_id) {
+                    o.status = ArbStatus::Failed;
+                }
+            }
+
+            state.last_command = Some(Utc::now());
+
+            if let Err(e) = self.db.save_capital(state.portfolio.capital) {
+                warn!("DB save_capital (arb) failed: {}", e);
+            }
+        }
+
+        let msg = if all_filled {
+            format!(
+                "Arb executed: {} legs filled, cost=${:.4}, expected profit=${:.4} ({:.2}%)",
+                legs_filled, total_cost, expected_profit, opp.profit_pct
+            )
+        } else {
+            format!(
+                "Arb partial: {}/{} legs filled ({})",
+                legs_filled, opp.legs.len(), opp.arb_type.label()
+            )
+        };
+
+        info!("{}", msg);
+
+        Ok(ArbExecutionResponse {
+            success: all_filled,
+            message: msg,
+            legs_filled,
+            legs_total: opp.legs.len(),
+            total_cost: if all_filled { total_cost } else { 0.0 },
+            expected_profit: if all_filled { expected_profit } else { 0.0 },
+            trade_ids,
+        })
     }
 
     // ═══════════════════════════════════════════

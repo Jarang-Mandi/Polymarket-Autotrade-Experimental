@@ -40,10 +40,16 @@ pub async fn start_dashboard_server(
         .route("/api/markets", get(get_markets))
         .route("/api/costs", get(get_costs))
         .route("/api/health", get(health))
+        // Arbitrage endpoints
+        .route("/api/arb-opportunities", get(get_arb_opportunities))
+        .route("/api/arb-stats", get(get_arb_stats))
+        .route("/api/arb-config", get(get_arb_config))
         // Command endpoints (OpenClaw → Engine)
         .route("/api/trade", post(post_trade))
         .route("/api/close", post(post_close))
         .route("/api/report-cost", post(post_report_cost))
+        .route("/api/execute-arb", post(post_execute_arb))
+        .route("/api/arb-config", post(post_arb_config))
         // WebSocket
         .route("/ws", get(ws_handler))
         .layer(cors)
@@ -197,6 +203,101 @@ async fn post_report_cost(
 ) -> Result<Json<serde_json::Value>, EngineError> {
     engine.handle_cost_report(report).await;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ═══════════════════════════════════════════
+// ARBITRAGE ENDPOINTS
+// ═══════════════════════════════════════════
+
+/// GET /api/arb-opportunities — list detected arb opportunities
+async fn get_arb_opportunities(
+    State((state, _)): State<(SharedState, SharedEngine)>,
+) -> impl IntoResponse {
+    let s = state.read().await;
+    let opps: Vec<serde_json::Value> = s.arb_opportunities
+        .iter()
+        .map(|o| {
+            serde_json::json!({
+                "id": o.id,
+                "type": o.arb_type.label(),
+                "guaranteed": o.arb_type.is_guaranteed(),
+                "legs": o.legs.len(),
+                "total_cost": o.total_cost,
+                "guaranteed_payout": o.guaranteed_payout,
+                "profit": o.profit,
+                "profit_pct": o.profit_pct,
+                "liquidity_score": o.liquidity_score,
+                "detected_at": o.detected_at,
+                "status": o.status,
+                "event_slug": o.event_slug,
+                "leg_details": o.legs.iter().map(|l| serde_json::json!({
+                    "market_id": l.market_id,
+                    "question": l.market_question,
+                    "side": l.side,
+                    "price": l.price,
+                    "neg_risk": l.neg_risk,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Json(opps)
+}
+
+/// GET /api/arb-stats — arbitrage scanner statistics
+async fn get_arb_stats(
+    State((state, _)): State<(SharedState, SharedEngine)>,
+) -> impl IntoResponse {
+    let s = state.read().await;
+    Json(serde_json::json!({
+        "opportunities_found": s.arb_stats.opportunities_found,
+        "opportunities_executed": s.arb_stats.opportunities_executed,
+        "total_profit": s.arb_stats.total_profit,
+        "avg_profit_pct": s.arb_stats.avg_profit_pct,
+        "missed_arbs": s.arb_stats.missed_arbs,
+        "partial_fills": s.arb_stats.partial_fills,
+        "last_scan_at": s.arb_stats.last_scan_at,
+        "markets_scanned": s.arb_stats.markets_scanned,
+        "active_arb_count": s.active_arb_count,
+        "scanner_enabled": s.arb_config.enabled,
+    }))
+}
+
+/// GET /api/arb-config — current arb scanner configuration
+async fn get_arb_config(
+    State((state, _)): State<(SharedState, SharedEngine)>,
+) -> impl IntoResponse {
+    let s = state.read().await;
+    Json(serde_json::json!({
+        "enabled": s.arb_config.enabled,
+        "min_profit_pct": s.arb_config.min_profit_pct,
+        "min_liquidity": s.arb_config.min_liquidity,
+        "max_arb_size": s.arb_config.max_arb_size,
+        "min_spread": s.arb_config.min_spread,
+        "min_volume_24h_spread": s.arb_config.min_volume_24h_spread,
+        "max_concurrent_arbs": s.arb_config.max_concurrent_arbs,
+        "auto_execute_guaranteed": s.arb_config.auto_execute_guaranteed,
+    }))
+}
+
+/// POST /api/execute-arb — OpenClaw confirms execution of an arb opportunity
+async fn post_execute_arb(
+    State((_, engine)): State<(SharedState, SharedEngine)>,
+    Json(cmd): Json<ExecuteArbCommand>,
+) -> Result<Json<ArbExecutionResponse>, EngineError> {
+    let resp = engine.handle_execute_arb(cmd).await?;
+    Ok(Json(resp))
+}
+
+/// POST /api/arb-config — Update arb scanner config at runtime
+async fn post_arb_config(
+    State((state, _)): State<(SharedState, SharedEngine)>,
+    Json(update): Json<ArbConfig>,
+) -> Result<Json<serde_json::Value>, EngineError> {
+    let mut s = state.write().await;
+    s.arb_config = update;
+    info!("Arb config updated: enabled={}, min_profit={:.1}%, max_size=${:.2}",
+        s.arb_config.enabled, s.arb_config.min_profit_pct, s.arb_config.max_arb_size);
+    Ok(Json(serde_json::json!({ "ok": true, "message": "Arb config updated" })))
 }
 
 // ═══════════════════════════════════════════

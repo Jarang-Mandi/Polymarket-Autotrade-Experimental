@@ -286,10 +286,181 @@ impl PolymarketClient {
         warn!("CANCEL ORDER: {}", order_id);
         Ok(true)
     }
+
+    // ═══════════════════════════════════════
+    // ARBITRAGE SCANNING
+    // ═══════════════════════════════════════
+
+    /// Get best ask prices for both YES and NO tokens of a binary market.
+    /// Returns (yes_ask, no_ask) from the actual CLOB orderbook.
+    pub async fn get_binary_prices(&self, yes_token_id: &str, no_token_id: &str) -> EngineResult<(f64, f64)> {
+        // Fetch both orderbooks
+        let yes_book = self.get_order_book(yes_token_id).await?;
+        let no_book = self.get_order_book(no_token_id).await?;
+
+        let yes_ask = Self::extract_best_ask(&yes_book)
+            .ok_or_else(|| EngineError::PolymarketParse("No YES asks in orderbook".into()))?;
+        let no_ask = Self::extract_best_ask(&no_book)
+            .ok_or_else(|| EngineError::PolymarketParse("No NO asks in orderbook".into()))?;
+
+        Ok((yes_ask, no_ask))
+    }
+
+    /// Get best bid prices for both YES and NO tokens.
+    /// Returns (yes_bid, no_bid).
+    pub async fn get_binary_bids(&self, yes_token_id: &str, no_token_id: &str) -> EngineResult<(f64, f64)> {
+        let yes_book = self.get_order_book(yes_token_id).await?;
+        let no_book = self.get_order_book(no_token_id).await?;
+
+        let yes_bid = Self::extract_best_bid(&yes_book)
+            .ok_or_else(|| EngineError::PolymarketParse("No YES bids in orderbook".into()))?;
+        let no_bid = Self::extract_best_bid(&no_book)
+            .ok_or_else(|| EngineError::PolymarketParse("No NO bids in orderbook".into()))?;
+
+        Ok((yes_bid, no_bid))
+    }
+
+    /// Fetch all markets for a given event (for multi-outcome arb scanning).
+    /// Uses Gamma API events endpoint to get related markets.
+    pub async fn get_event_markets(&self, event_slug: &str) -> EngineResult<Vec<Market>> {
+        let url = format!("{}/events", self.gamma_url);
+        let data = self.get_with_retry(&url, &[("slug", event_slug.to_string())]).await?;
+
+        // Events API returns array or single object
+        let event = if let Some(arr) = data.as_array() {
+            arr.first().cloned()
+        } else {
+            Some(data)
+        };
+
+        let event = event.ok_or_else(|| {
+            EngineError::PolymarketParse(format!("Event not found: {}", event_slug))
+        })?;
+
+        let markets_raw = event["markets"].as_array().ok_or_else(|| {
+            EngineError::PolymarketParse("Event has no 'markets' array".into())
+        })?;
+
+        let mut result = Vec::new();
+        for m in markets_raw {
+            if let Ok(market) = parse_market(m) {
+                if market.enable_order_book.unwrap_or(false) {
+                    result.push(market);
+                }
+            }
+        }
+
+        info!("Event '{}': found {} tradeable markets", event_slug, result.len());
+        Ok(result)
+    }
+
+    /// Scan for neg-risk multi-outcome events among cached markets.
+    /// Returns event slugs that have neg_risk=true and multiple markets.
+    pub async fn get_neg_risk_events(&self, limit: u32) -> EngineResult<Vec<Value>> {
+        let url = format!("{}/events", self.gamma_url);
+        let data = self.get_with_retry(&url, &[
+            ("limit", limit.to_string()),
+            ("active", "true".to_string()),
+            ("closed", "false".to_string()),
+        ]).await?;
+
+        let events = data.as_array().ok_or_else(|| {
+            EngineError::PolymarketParse("Expected array from /events".into())
+        })?;
+
+        let neg_risk_events: Vec<Value> = events
+            .iter()
+            .filter(|e| {
+                let is_neg = e["negRisk"].as_bool().unwrap_or(false);
+                let has_markets = e["markets"].as_array().map(|m| m.len() >= 2).unwrap_or(false);
+                is_neg && has_markets
+            })
+            .cloned()
+            .collect();
+
+        info!("Found {} neg-risk multi-outcome events", neg_risk_events.len());
+        Ok(neg_risk_events)
+    }
+
+    /// Get available liquidity (depth) at best ask for a token.
+    /// Returns (best_ask_price, size_available_at_best_ask).
+    pub async fn get_ask_depth(&self, token_id: &str) -> EngineResult<(f64, f64)> {
+        let book = self.get_order_book(token_id).await?;
+        let asks = book["asks"].as_array().ok_or_else(|| {
+            EngineError::PolymarketParse("No asks array in orderbook".into())
+        })?;
+
+        if asks.is_empty() {
+            return Err(EngineError::PolymarketParse("Asks array is empty".into()));
+        }
+
+        // Asks are sorted lowest first
+        let best = &asks[0];
+        let price = Self::parse_book_price(best)?;
+        let size = Self::parse_book_size(best)?;
+
+        Ok((price, size))
+    }
+
+    /// Get available liquidity (depth) at best bid for a token.
+    /// Returns (best_bid_price, size_available_at_best_bid).
+    pub async fn get_bid_depth(&self, token_id: &str) -> EngineResult<(f64, f64)> {
+        let book = self.get_order_book(token_id).await?;
+        let bids = book["bids"].as_array().ok_or_else(|| {
+            EngineError::PolymarketParse("No bids array in orderbook".into())
+        })?;
+
+        if bids.is_empty() {
+            return Err(EngineError::PolymarketParse("Bids array is empty".into()));
+        }
+
+        // Bids are sorted highest first
+        let best = &bids[0];
+        let price = Self::parse_book_price(best)?;
+        let size = Self::parse_book_size(best)?;
+
+        Ok((price, size))
+    }
+
+    // ═══════════════════════════════════════
+    // ORDERBOOK HELPERS
+    // ═══════════════════════════════════════
+
+    fn extract_best_ask(book: &Value) -> Option<f64> {
+        book["asks"]
+            .as_array()?
+            .first()
+            .and_then(|a| Self::parse_book_price(a).ok())
+    }
+
+    fn extract_best_bid(book: &Value) -> Option<f64> {
+        book["bids"]
+            .as_array()?
+            .first()
+            .and_then(|b| Self::parse_book_price(b).ok())
+    }
+
+    fn parse_book_price(entry: &Value) -> EngineResult<f64> {
+        entry["price"]
+            .as_str()
+            .or_else(|| entry["p"].as_str())
+            .ok_or_else(|| EngineError::PolymarketParse("No price in book entry".into()))?
+            .parse::<f64>()
+            .map_err(|e| EngineError::PolymarketParse(format!("Invalid book price: {}", e)))
+    }
+
+    fn parse_book_size(entry: &Value) -> EngineResult<f64> {
+        entry["size"]
+            .as_str()
+            .or_else(|| entry["s"].as_str())
+            .ok_or_else(|| EngineError::PolymarketParse("No size in book entry".into()))?
+            .parse::<f64>()
+            .map_err(|e| EngineError::PolymarketParse(format!("Invalid book size: {}", e)))
+    }
 }
 
 /// Parse Gamma API JSON into Market struct
-fn parse_market(v: &Value) -> EngineResult<Market> {
+pub fn parse_market(v: &Value) -> EngineResult<Market> {
     let id = v["id"].as_str().unwrap_or("").to_string();
     if id.is_empty() {
         return Err(EngineError::PolymarketParse("Market missing 'id' field".into()));

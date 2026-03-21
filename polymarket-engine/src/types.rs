@@ -432,6 +432,154 @@ pub struct ApiCostReport {
 }
 
 // ═══════════════════════════════════════════
+// ARBITRAGE TYPES
+// ═══════════════════════════════════════════
+
+/// The kind of arbitrage opportunity detected
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum ArbitrageType {
+    /// YES_ask + NO_ask < $1.00 on a single binary market
+    BinaryMispricing,
+    /// Sum of all YES_ask prices in a neg-risk multi-outcome event < $1.00
+    MultiOutcomeUnderpriced,
+    /// Sum of all YES_bid prices in a neg-risk multi-outcome event > $1.00
+    MultiOutcomeOverpriced,
+    /// Wide bid-ask spread on a liquid market — place both sides
+    SpreadCapture,
+}
+
+impl ArbitrageType {
+    pub fn label(&self) -> &str {
+        match self {
+            Self::BinaryMispricing => "Binary Arb",
+            Self::MultiOutcomeUnderpriced => "Multi-Outcome Under",
+            Self::MultiOutcomeOverpriced => "Multi-Outcome Over",
+            Self::SpreadCapture => "Spread Capture",
+        }
+    }
+
+    pub fn is_guaranteed(&self) -> bool {
+        matches!(self, Self::BinaryMispricing | Self::MultiOutcomeUnderpriced | Self::MultiOutcomeOverpriced)
+    }
+}
+
+/// A detected arbitrage opportunity
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArbitrageOpportunity {
+    pub id: String,
+    pub arb_type: ArbitrageType,
+    /// The market(s) involved
+    pub legs: Vec<ArbLeg>,
+    /// Total cost to enter the arb (buy all legs)
+    pub total_cost: f64,
+    /// Guaranteed payout on resolution
+    pub guaranteed_payout: f64,
+    /// Net profit = payout - cost
+    pub profit: f64,
+    /// Profit as percentage of cost
+    pub profit_pct: f64,
+    /// Combined liquidity across legs
+    pub liquidity_score: f64,
+    /// When was this opportunity detected
+    pub detected_at: DateTime<Utc>,
+    /// Has it been executed?
+    pub status: ArbStatus,
+    /// Optional: event slug for multi-outcome
+    pub event_slug: Option<String>,
+}
+
+/// One leg of an arbitrage trade
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArbLeg {
+    pub market_id: String,
+    pub market_question: String,
+    pub token_id: String,
+    pub side: Side,
+    pub price: f64,
+    pub size: f64,
+    pub neg_risk: bool,
+}
+
+/// Execution status of an arb opportunity
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum ArbStatus {
+    Detected,
+    Executing,
+    Filled,
+    PartialFill,
+    Expired,
+    Failed,
+}
+
+/// Command to execute a detected arb opportunity
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecuteArbCommand {
+    pub opportunity_id: String,
+    /// Override size (in units); if None, uses max affordable
+    pub size_override: Option<f64>,
+}
+
+/// Response after arb execution attempt
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArbExecutionResponse {
+    pub success: bool,
+    pub message: String,
+    pub legs_filled: usize,
+    pub legs_total: usize,
+    pub total_cost: f64,
+    pub expected_profit: f64,
+    pub trade_ids: Vec<String>,
+}
+
+/// Arbitrage scanner configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArbConfig {
+    pub enabled: bool,
+    /// Minimum profit % to consider (after slippage estimate)
+    pub min_profit_pct: f64,
+    /// Minimum liquidity per leg ($)
+    pub min_liquidity: f64,
+    /// Maximum capital per single arb trade ($)
+    pub max_arb_size: f64,
+    /// Minimum spread for spread-capture type ($)
+    pub min_spread: f64,
+    /// Minimum 24h volume for spread capture
+    pub min_volume_24h_spread: f64,
+    /// How many concurrent arbs allowed
+    pub max_concurrent_arbs: usize,
+    /// Auto-execute guaranteed arbs (type 1+2) without OpenClaw confirmation
+    pub auto_execute_guaranteed: bool,
+}
+
+impl Default for ArbConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_profit_pct: 1.5,
+            min_liquidity: 2_000.0,
+            max_arb_size: 5.0,
+            min_spread: 0.04,
+            min_volume_24h_spread: 50_000.0,
+            max_concurrent_arbs: 3,
+            auto_execute_guaranteed: false,
+        }
+    }
+}
+
+/// Aggregate stats for the arb scanner
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ArbStats {
+    pub opportunities_found: u64,
+    pub opportunities_executed: u64,
+    pub total_profit: f64,
+    pub avg_profit_pct: f64,
+    pub missed_arbs: u64,
+    pub partial_fills: u64,
+    pub last_scan_at: Option<DateTime<Utc>>,
+    pub markets_scanned: u64,
+}
+
+// ═══════════════════════════════════════════
 // WEBSOCKET MESSAGE
 // ═══════════════════════════════════════════
 

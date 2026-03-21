@@ -23,6 +23,8 @@ export function useEngineState() {
   const [costs, setCosts] = useState(null)
   const [connected, setConnected] = useState(false)
   const [capitalHistory, setCapitalHistory] = useState([{ time: Date.now(), capital: 50 }])
+  const [arbOpportunities, setArbOpportunities] = useState([])
+  const [arbStats, setArbStats] = useState(null)
   const wsRef = useRef(null)
 
   // WebSocket connection
@@ -90,16 +92,20 @@ export function useEngineState() {
   // Poll REST endpoints
   const fetchData = useCallback(async () => {
     try {
-      const [stateRes, tradesRes, marketsRes, costsRes] = await Promise.all([
+      const [stateRes, tradesRes, marketsRes, costsRes, arbRes, arbStatsRes] = await Promise.all([
         fetch(`${API_BASE}/state`).then(r => r.ok ? r.json() : null).catch(() => null),
         fetch(`${API_BASE}/trades`).then(r => r.ok ? r.json() : null).catch(() => null),
         fetch(`${API_BASE}/markets`).then(r => r.ok ? r.json() : null).catch(() => null),
         fetch(`${API_BASE}/costs`).then(r => r.ok ? r.json() : null).catch(() => null),
+        fetch(`${API_BASE}/arb-opportunities`).then(r => r.ok ? r.json() : null).catch(() => null),
+        fetch(`${API_BASE}/arb-stats`).then(r => r.ok ? r.json() : null).catch(() => null),
       ])
       if (stateRes) setState(prev => ({ ...prev, ...stateRes }))
       if (tradesRes) setTrades(tradesRes)
       if (marketsRes) setMarkets(marketsRes)
       if (costsRes) setCosts(costsRes)
+      if (arbRes) setArbOpportunities(arbRes)
+      if (arbStatsRes) setArbStats(arbStatsRes)
     } catch (e) { /* offline */ }
   }, [])
 
@@ -109,5 +115,5 @@ export function useEngineState() {
     return () => clearInterval(interval)
   }, [fetchData])
 
-  return { state, positions, trades, markets, costs, connected, capitalHistory }
+  return { state, positions, trades, markets, costs, connected, capitalHistory, arbOpportunities, arbStats }
 }
