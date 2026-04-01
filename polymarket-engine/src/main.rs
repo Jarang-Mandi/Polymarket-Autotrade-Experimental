@@ -1,10 +1,10 @@
 mod config;
 mod db;
-mod error;
-mod types;
-mod polymarket;
 mod engine;
+mod error;
+mod polymarket;
 mod server;
+mod types;
 
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
@@ -13,8 +13,7 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
@@ -24,13 +23,18 @@ async fn main() -> anyhow::Result<()> {
 
     // Validate critical config
     if config.private_key.is_empty() {
-        return Err(anyhow::anyhow!("POLYMARKET_PRIVATE_KEY is required but empty"));
+        return Err(anyhow::anyhow!(
+            "POLYMARKET_PRIVATE_KEY is required but empty"
+        ));
     }
 
     tracing::info!("╔══════════════════════════════════════════════╗");
     tracing::info!("║   POLYMARKET EXECUTION ENGINE v0.3           ║");
     tracing::info!("║   Mode: COMMAND-DRIVEN (OpenClaw = brain)    ║");
-    tracing::info!("║   Capital: ${:<10.2}                       ║", config.initial_capital);
+    tracing::info!(
+        "║   Capital: ${:<10.2}                       ║",
+        config.initial_capital
+    );
     tracing::info!("║   DB: {:<37} ║", config.db_path);
     tracing::info!("╚══════════════════════════════════════════════╝");
 
@@ -51,7 +55,9 @@ async fn main() -> anyhow::Result<()> {
             dashboard_port,
             state,
             engine_for_server,
-        ).await {
+        )
+        .await
+        {
             tracing::error!("Server fatal error: {}", e);
             std::process::exit(1);
         }

@@ -71,7 +71,16 @@ cargo run --release
 |----------|--------|-------------|
 | `/api/trade` | POST | Execute a trade command |
 | `/api/close` | POST | Close a position |
+| `/api/ai-exit-review` | POST | AI reasoning for hold/close + optional close execution |
+| `/api/risk-thresholds/propose` | POST | Propose SL/TP/auto-close change (pending user confirm) |
+| `/api/risk-thresholds/confirm` | POST | Approve/reject pending SL/TP proposal |
 | `/api/report-cost` | POST | Report Claude API usage |
+
+### Exit Policy Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/risk-thresholds` | GET | Current SL/TP policy + pending proposal |
 
 ### Trade Command Example
 
@@ -105,7 +114,7 @@ POST /api/trade
 | Loop | Interval | Action |
 |------|----------|--------|
 | Market Scan | 5min | Fetch markets from Gamma API, cache for OpenClaw |
-| Position Monitor | 60s | Update prices, trigger stop-loss (-15%) / take-profit (+30%) |
+| Position Monitor | 60s | Update position prices; auto-close only if `POSITION_AUTO_CLOSE_ENABLED=true` |
 | Heartbeat | 30s | Update timestamps, recalculate agent state |
 | DB Snapshot | 1hr | Save portfolio snapshot for historical charts |
 
@@ -116,11 +125,21 @@ POST /api/trade
 | Max position size | $5.00 |
 | Max portfolio risk | 6% per trade |
 | Max concurrent positions | 5 |
-| Stop-loss | -15% |
-| Take-profit | +30% |
+| Stop-loss | Runtime policy (`DEFAULT_STOP_LOSS_PCT`) |
+| Take-profit | Runtime policy (`DEFAULT_TAKE_PROFIT_PCT`) |
+| Auto-close mode | `POSITION_AUTO_CLOSE_ENABLED` (default: `false`) |
 | Min edge (Neutral state) | 8% |
 | Min confidence | 50% |
 | Daily API budget | $0.50 |
+
+## SL/TP Confirmation Flow
+
+1. AI proposes threshold change via `POST /api/risk-thresholds/propose`.
+2. Engine stores proposal as pending and does **not** apply it yet.
+3. User confirms/rejects via `POST /api/risk-thresholds/confirm`.
+4. Only after approval, new thresholds become active.
+
+This keeps SL/TP adjustments user-controlled while still allowing AI-generated reasoning.
 
 ## Agent States
 

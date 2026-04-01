@@ -34,6 +34,7 @@ export default function PositionsTable({ positions }) {
               <th className="py-2 text-right">Current</th>
               <th className="py-2 text-right">P&L</th>
               <th className="py-2 text-right">P&L %</th>
+              <th className="py-2 text-right">Result</th>
             </tr>
           </thead>
           <tbody>
@@ -41,6 +42,13 @@ export default function PositionsTable({ positions }) {
               const pnl = pos.unrealized_pnl || 0
               const pnlPct = pos.cost_basis ? (pnl / pos.cost_basis * 100) : 0
               const pnlColor = pnl >= 0 ? 'text-green-400' : 'text-red-400'
+              const result = pnl > 0 ? 'WIN' : pnl < 0 ? 'LOSE' : 'FLAT'
+              const resultColor =
+                result === 'WIN'
+                  ? 'text-green-400'
+                  : result === 'LOSE'
+                    ? 'text-red-400'
+                    : 'text-gray-400'
 
               return (
                 <tr key={pos.id || i} className="border-b border-gray-800/50 hover:bg-gray-800/30">
@@ -60,6 +68,9 @@ export default function PositionsTable({ positions }) {
                   </td>
                   <td className={`py-2 text-right ${pnlColor}`}>
                     {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(1)}%
+                  </td>
+                  <td className={`py-2 text-right font-semibold ${resultColor}`}>
+                    {result}
                   </td>
                 </tr>
               )

@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 // ═══════════════════════════════════════════
@@ -8,11 +8,11 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum AgentState {
-    Survival,    // <$15 — preserve capital at all costs
-    Defensive,   // $15-30 — careful, high-conviction only
-    Neutral,     // $30-60 — balanced approach
-    Aggressive,  // $60-120 — compound growth mode
-    Apex,        // >$120 — maximum deployment
+    Survival,   // <$15 — preserve capital at all costs
+    Defensive,  // $15-30 — careful, high-conviction only
+    Neutral,    // $30-60 — balanced approach
+    Aggressive, // $60-120 — compound growth mode
+    Apex,       // >$120 — maximum deployment
 }
 
 impl AgentState {
@@ -49,18 +49,24 @@ impl AgentState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum HungerLevel {
-    Starving,    // No profit in 48h+
-    Hungry,      // No profit in 24h
-    Seeking,     // Below daily target
-    Satisfied,   // Meeting target
-    Feasting,    // Exceeding target
+    Starving,  // No profit in 48h+
+    Hungry,    // No profit in 24h
+    Seeking,   // Below daily target
+    Satisfied, // Meeting target
+    Feasting,  // Exceeding target
 }
 
 impl HungerLevel {
     pub fn from_hours_since_profit(hours: f64, daily_target_met: bool) -> Self {
-        if hours > 48.0 { return Self::Starving; }
-        if hours > 24.0 { return Self::Hungry; }
-        if !daily_target_met { return Self::Seeking; }
+        if hours > 48.0 {
+            return Self::Starving;
+        }
+        if hours > 24.0 {
+            return Self::Hungry;
+        }
+        if !daily_target_met {
+            return Self::Seeking;
+        }
         Self::Satisfied
     }
 }
@@ -97,7 +103,10 @@ impl Market {
     pub fn token_ids(&self) -> Option<(String, String)> {
         let ids = self.clob_token_ids.as_ref()?;
         // Format: "[\"token_yes_id\",\"token_no_id\"]"
-        let cleaned: String = ids.chars().filter(|c| !['[', ']', '"', ' '].contains(c)).collect();
+        let cleaned: String = ids
+            .chars()
+            .filter(|c| !['[', ']', '"', ' '].contains(c))
+            .collect();
         let parts: Vec<&str> = cleaned.split(',').collect();
         if parts.len() == 2 {
             Some((parts[0].to_string(), parts[1].to_string()))
@@ -109,7 +118,10 @@ impl Market {
     /// Get YES price
     pub fn yes_price(&self) -> Option<f64> {
         let prices = self.outcome_prices.as_ref()?;
-        let cleaned: String = prices.chars().filter(|c| !['[', ']', '"', ' '].contains(c)).collect();
+        let cleaned: String = prices
+            .chars()
+            .filter(|c| !['[', ']', '"', ' '].contains(c))
+            .collect();
         let parts: Vec<&str> = cleaned.split(',').collect();
         parts.first()?.parse().ok()
     }
@@ -117,7 +129,10 @@ impl Market {
     /// Get NO price
     pub fn no_price(&self) -> Option<f64> {
         let prices = self.outcome_prices.as_ref()?;
-        let cleaned: String = prices.chars().filter(|c| !['[', ']', '"', ' '].contains(c)).collect();
+        let cleaned: String = prices
+            .chars()
+            .filter(|c| !['[', ']', '"', ' '].contains(c))
+            .collect();
         let parts: Vec<&str> = cleaned.split(',').collect();
         parts.get(1)?.parse().ok()
     }
@@ -136,9 +151,9 @@ pub enum Side {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum OrderType {
-    GTC,  // Good Till Cancel
-    GTD,  // Good Till Date
-    FOK,  // Fill Or Kill
+    GTC, // Good Till Cancel
+    GTD, // Good Till Date
+    FOK, // Fill Or Kill
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,7 +250,9 @@ impl Position {
     }
 
     pub fn pnl_pct(&self) -> f64 {
-        if self.cost_basis == 0.0 { return 0.0; }
+        if self.cost_basis == 0.0 {
+            return 0.0;
+        }
         self.unrealized_pnl / self.cost_basis * 100.0
     }
 }
@@ -324,7 +341,13 @@ impl ApiCostTracker {
     }
 
     /// Claude Opus 4.6 pricing
-    pub fn add_usage(&mut self, input_tokens: u64, output_tokens: u64, cache_read: u64, cache_write: u64) {
+    pub fn add_usage(
+        &mut self,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read: u64,
+        cache_write: u64,
+    ) {
         self.total_input_tokens += input_tokens;
         self.total_output_tokens += output_tokens;
         self.total_cache_read_tokens += cache_read;
@@ -359,7 +382,9 @@ impl ApiCostTracker {
     }
 
     pub fn usage_pct(&self) -> f64 {
-        if self.daily_budget == 0.0 { return 100.0; }
+        if self.daily_budget == 0.0 {
+            return 100.0;
+        }
         (self.daily_cost_usd / self.daily_budget) * 100.0
     }
 }
@@ -413,6 +438,78 @@ pub struct CloseCommand {
     pub reason: String,
 }
 
+/// Runtime SL/TP policy used by AI/manual exit decisions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskThresholds {
+    /// Stop-loss trigger in percent (example: 15.0 means -15%).
+    pub stop_loss_pct: f64,
+    /// Take-profit trigger in percent (example: 30.0 means +30%).
+    pub take_profit_pct: f64,
+    /// If true, engine background loop can auto-close on SL/TP triggers.
+    /// If false, only explicit AI/user close commands are allowed.
+    pub auto_close_enabled: bool,
+}
+
+impl Default for RiskThresholds {
+    fn default() -> Self {
+        Self {
+            stop_loss_pct: 15.0,
+            take_profit_pct: 30.0,
+            auto_close_enabled: false,
+        }
+    }
+}
+
+/// Pending proposal waiting for explicit user confirmation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskThresholdProposal {
+    pub id: String,
+    pub proposed_stop_loss_pct: f64,
+    pub proposed_take_profit_pct: f64,
+    pub proposed_auto_close_enabled: bool,
+    pub proposed_by: String,
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl RiskThresholdProposal {
+    pub fn new(
+        stop_loss_pct: f64,
+        take_profit_pct: f64,
+        auto_close_enabled: bool,
+        proposed_by: &str,
+        reason: &str,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            proposed_stop_loss_pct: stop_loss_pct,
+            proposed_take_profit_pct: take_profit_pct,
+            proposed_auto_close_enabled: auto_close_enabled,
+            proposed_by: proposed_by.to_string(),
+            reason: reason.to_string(),
+            created_at: Utc::now(),
+        }
+    }
+}
+
+/// AI/OpenClaw requests a threshold change proposal (not applied immediately).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposeRiskThresholdsCommand {
+    pub stop_loss_pct: f64,
+    pub take_profit_pct: f64,
+    pub auto_close_enabled: bool,
+    pub proposed_by: String,
+    pub reason: String,
+}
+
+/// User confirms or rejects a pending threshold proposal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfirmRiskThresholdsCommand {
+    pub proposal_id: String,
+    pub approved: bool,
+    pub confirmed_by: String,
+}
+
 /// Response back to OpenClaw after executing a command
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandResponse {
@@ -420,6 +517,46 @@ pub struct CommandResponse {
     pub message: String,
     pub trade_id: Option<String>,
     pub position_id: Option<String>,
+}
+
+/// Generic response for threshold proposal/confirmation flow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskThresholdsUpdateResponse {
+    pub success: bool,
+    pub message: String,
+    pub requires_confirmation: bool,
+    pub applied: bool,
+    pub proposal_id: Option<String>,
+    pub thresholds: RiskThresholds,
+    pub pending_proposal: Option<RiskThresholdProposal>,
+}
+
+/// Ask engine for AI-style exit reasoning on one open position.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiExitReviewCommand {
+    pub position_id: String,
+    /// If true and recommendation is CLOSE, engine executes close immediately.
+    pub execute_close: bool,
+    /// Optional external reasoning context from the AI brain.
+    pub context: Option<String>,
+}
+
+/// AI exit review output (reasoning + recommendation + optional execution result).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiExitReviewResponse {
+    pub success: bool,
+    pub position_id: String,
+    pub should_close: bool,
+    pub recommended_reason: String,
+    pub reasoning: Vec<String>,
+    pub entry_price: f64,
+    pub current_price: f64,
+    pub pnl_pct: f64,
+    pub stop_loss_pct: f64,
+    pub take_profit_pct: f64,
+    pub auto_close_enabled: bool,
+    pub executed_close: bool,
+    pub close_response: Option<CommandResponse>,
 }
 
 /// API cost report that OpenClaw sends to engine for tracking
@@ -459,7 +596,10 @@ impl ArbitrageType {
     }
 
     pub fn is_guaranteed(&self) -> bool {
-        matches!(self, Self::BinaryMispricing | Self::MultiOutcomeUnderpriced | Self::MultiOutcomeOverpriced)
+        matches!(
+            self,
+            Self::BinaryMispricing | Self::MultiOutcomeUnderpriced | Self::MultiOutcomeOverpriced
+        )
     }
 }
 

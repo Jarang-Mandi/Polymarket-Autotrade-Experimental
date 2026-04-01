@@ -40,7 +40,13 @@ impl PolymarketClient {
         for attempt in 0..self.max_retries {
             if attempt > 0 {
                 let delay = 1000 * 2u64.pow(attempt);
-                tracing::debug!("Retry {}/{} for {} (delay {}ms)", attempt + 1, self.max_retries, url, delay);
+                tracing::debug!(
+                    "Retry {}/{} for {} (delay {}ms)",
+                    attempt + 1,
+                    self.max_retries,
+                    url,
+                    delay
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
             }
 
@@ -56,7 +62,9 @@ impl PolymarketClient {
                             .and_then(|s| s.parse::<u64>().ok())
                             .unwrap_or(5)
                             * 1000;
-                        last_err = Some(EngineError::PolymarketRateLimit { retry_after_ms: retry_after });
+                        last_err = Some(EngineError::PolymarketRateLimit {
+                            retry_after_ms: retry_after,
+                        });
                         tokio::time::sleep(std::time::Duration::from_millis(retry_after)).await;
                         continue;
                     }
@@ -67,13 +75,16 @@ impl PolymarketClient {
                             status,
                             message: body.chars().take(200).collect(),
                         });
-                        if status >= 500 { continue; } // Retry 5xx
+                        if status >= 500 {
+                            continue;
+                        } // Retry 5xx
                         return Err(last_err.unwrap());
                     }
 
-                    return resp.json().await.map_err(|e| {
-                        EngineError::PolymarketParse(format!("JSON decode: {}", e))
-                    });
+                    return resp
+                        .json()
+                        .await
+                        .map_err(|e| EngineError::PolymarketParse(format!("JSON decode: {}", e)));
                 }
                 Err(e) => {
                     if e.is_timeout() {
@@ -107,18 +118,23 @@ impl PolymarketClient {
     ) -> EngineResult<Vec<Market>> {
         let url = format!("{}/markets", self.gamma_url);
 
-        let data = self.get_with_retry(&url, &[
-            ("limit", limit.to_string()),
-            ("offset", offset.to_string()),
-            ("active", active.to_string()),
-            ("closed", "false".to_string()),
-            ("order", "volume24hr".to_string()),
-            ("ascending", "false".to_string()),
-        ]).await?;
+        let data = self
+            .get_with_retry(
+                &url,
+                &[
+                    ("limit", limit.to_string()),
+                    ("offset", offset.to_string()),
+                    ("active", active.to_string()),
+                    ("closed", "false".to_string()),
+                    ("order", "volume24hr".to_string()),
+                    ("ascending", "false".to_string()),
+                ],
+            )
+            .await?;
 
-        let markets_raw = data.as_array().ok_or_else(|| {
-            EngineError::PolymarketParse("Expected array from /markets".into())
-        })?;
+        let markets_raw = data
+            .as_array()
+            .ok_or_else(|| EngineError::PolymarketParse("Expected array from /markets".into()))?;
 
         let mut result = Vec::new();
         let mut parse_errors = 0;
@@ -126,12 +142,18 @@ impl PolymarketClient {
         for m in markets_raw {
             match parse_market(m) {
                 Ok(market) => result.push(market),
-                Err(_) => { parse_errors += 1; }
+                Err(_) => {
+                    parse_errors += 1;
+                }
             }
         }
 
         if parse_errors > 0 {
-            warn!("Skipped {} unparseable markets out of {}", parse_errors, markets_raw.len());
+            warn!(
+                "Skipped {} unparseable markets out of {}",
+                parse_errors,
+                markets_raw.len()
+            );
         }
 
         info!("Fetched {} markets from Gamma API", result.len());
@@ -142,9 +164,9 @@ impl PolymarketClient {
     pub async fn get_market_by_slug(&self, slug: &str) -> EngineResult<Option<Market>> {
         let url = format!("{}/markets", self.gamma_url);
 
-        let data = self.get_with_retry(&url, &[
-            ("slug", slug.to_string()),
-        ]).await?;
+        let data = self
+            .get_with_retry(&url, &[("slug", slug.to_string())])
+            .await?;
 
         let markets = data.as_array().ok_or_else(|| {
             EngineError::PolymarketParse("Expected array from /markets?slug=".into())
@@ -161,9 +183,9 @@ impl PolymarketClient {
     pub async fn get_market_by_id(&self, market_id: &str) -> EngineResult<Option<Market>> {
         let url = format!("{}/markets", self.gamma_url);
 
-        let data = self.get_with_retry(&url, &[
-            ("id", market_id.to_string()),
-        ]).await?;
+        let data = self
+            .get_with_retry(&url, &[("id", market_id.to_string())])
+            .await?;
 
         let markets = data.as_array().ok_or_else(|| {
             EngineError::PolymarketParse("Expected array from /markets?id=".into())
@@ -195,8 +217,12 @@ impl PolymarketClient {
             })
             .collect();
 
-        info!("Found {} tradeable opportunities (vol>={}, liq>={})",
-            filtered.len(), min_volume_24h, min_liquidity);
+        info!(
+            "Found {} tradeable opportunities (vol>={}, liq>={})",
+            filtered.len(),
+            min_volume_24h,
+            min_liquidity
+        );
         Ok(filtered)
     }
 
@@ -213,17 +239,22 @@ impl PolymarketClient {
     /// Get order book for a token
     pub async fn get_order_book(&self, token_id: &str) -> EngineResult<Value> {
         let url = format!("{}/book", self.clob_url);
-        self.get_with_retry(&url, &[("token_id", token_id.to_string())]).await
+        self.get_with_retry(&url, &[("token_id", token_id.to_string())])
+            .await
     }
 
     /// Get midpoint price for a token
     pub async fn get_midpoint(&self, token_id: &str) -> EngineResult<f64> {
         let url = format!("{}/midpoint", self.clob_url);
-        let data = self.get_with_retry(&url, &[("token_id", token_id.to_string())]).await?;
+        let data = self
+            .get_with_retry(&url, &[("token_id", token_id.to_string())])
+            .await?;
 
         data["mid"]
             .as_str()
-            .ok_or_else(|| EngineError::PolymarketParse("Missing 'mid' in midpoint response".into()))?
+            .ok_or_else(|| {
+                EngineError::PolymarketParse("Missing 'mid' in midpoint response".into())
+            })?
             .parse::<f64>()
             .map_err(|e| EngineError::PolymarketParse(format!("Invalid midpoint: {}", e)))
     }
@@ -231,7 +262,9 @@ impl PolymarketClient {
     /// Get spread for a token
     pub async fn get_spread(&self, token_id: &str) -> EngineResult<(f64, f64)> {
         let url = format!("{}/spread", self.clob_url);
-        let data = self.get_with_retry(&url, &[("token_id", token_id.to_string())]).await?;
+        let data = self
+            .get_with_retry(&url, &[("token_id", token_id.to_string())])
+            .await?;
 
         let bid = data["bid"]
             .as_str()
@@ -252,22 +285,26 @@ impl PolymarketClient {
         fidelity: u32,
     ) -> EngineResult<Vec<Value>> {
         let url = format!("{}/prices-history", self.clob_url);
-        let data = self.get_with_retry(&url, &[
-            ("market", token_id.to_string()),
-            ("interval", interval.to_string()),
-            ("fidelity", fidelity.to_string()),
-        ]).await?;
+        let data = self
+            .get_with_retry(
+                &url,
+                &[
+                    ("market", token_id.to_string()),
+                    ("interval", interval.to_string()),
+                    ("fidelity", fidelity.to_string()),
+                ],
+            )
+            .await?;
 
-        Ok(data["history"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default())
+        Ok(data["history"].as_array().cloned().unwrap_or_default())
     }
 
     /// Get recent trades for market
     pub async fn get_trades(&self, condition_id: &str) -> EngineResult<Vec<Value>> {
         let url = format!("{}/trades", self.clob_url);
-        let data = self.get_with_retry(&url, &[("condition_id", condition_id.to_string())]).await?;
+        let data = self
+            .get_with_retry(&url, &[("condition_id", condition_id.to_string())])
+            .await?;
         Ok(data.as_array().cloned().unwrap_or_default())
     }
 
@@ -285,7 +322,10 @@ impl PolymarketClient {
 
         warn!(
             "ORDER INTENT: {} {} @ {} (token: {})",
-            match order.side { Side::Buy => "BUY", Side::Sell => "SELL" },
+            match order.side {
+                Side::Buy => "BUY",
+                Side::Sell => "SELL",
+            },
             order.size,
             order.price,
             order.token_id
@@ -312,7 +352,11 @@ impl PolymarketClient {
 
     /// Get best ask prices for both YES and NO tokens of a binary market.
     /// Returns (yes_ask, no_ask) from the actual CLOB orderbook.
-    pub async fn get_binary_prices(&self, yes_token_id: &str, no_token_id: &str) -> EngineResult<(f64, f64)> {
+    pub async fn get_binary_prices(
+        &self,
+        yes_token_id: &str,
+        no_token_id: &str,
+    ) -> EngineResult<(f64, f64)> {
         // Fetch both orderbooks
         let yes_book = self.get_order_book(yes_token_id).await?;
         let no_book = self.get_order_book(no_token_id).await?;
@@ -327,7 +371,11 @@ impl PolymarketClient {
 
     /// Get best bid prices for both YES and NO tokens.
     /// Returns (yes_bid, no_bid).
-    pub async fn get_binary_bids(&self, yes_token_id: &str, no_token_id: &str) -> EngineResult<(f64, f64)> {
+    pub async fn get_binary_bids(
+        &self,
+        yes_token_id: &str,
+        no_token_id: &str,
+    ) -> EngineResult<(f64, f64)> {
         let yes_book = self.get_order_book(yes_token_id).await?;
         let no_book = self.get_order_book(no_token_id).await?;
 
@@ -343,7 +391,9 @@ impl PolymarketClient {
     /// Uses Gamma API events endpoint to get related markets.
     pub async fn get_event_markets(&self, event_slug: &str) -> EngineResult<Vec<Market>> {
         let url = format!("{}/events", self.gamma_url);
-        let data = self.get_with_retry(&url, &[("slug", event_slug.to_string())]).await?;
+        let data = self
+            .get_with_retry(&url, &[("slug", event_slug.to_string())])
+            .await?;
 
         // Events API returns array or single object
         let event = if let Some(arr) = data.as_array() {
@@ -356,9 +406,9 @@ impl PolymarketClient {
             EngineError::PolymarketParse(format!("Event not found: {}", event_slug))
         })?;
 
-        let markets_raw = event["markets"].as_array().ok_or_else(|| {
-            EngineError::PolymarketParse("Event has no 'markets' array".into())
-        })?;
+        let markets_raw = event["markets"]
+            .as_array()
+            .ok_or_else(|| EngineError::PolymarketParse("Event has no 'markets' array".into()))?;
 
         let mut result = Vec::new();
         for m in markets_raw {
@@ -369,7 +419,11 @@ impl PolymarketClient {
             }
         }
 
-        info!("Event '{}': found {} tradeable markets", event_slug, result.len());
+        info!(
+            "Event '{}': found {} tradeable markets",
+            event_slug,
+            result.len()
+        );
         Ok(result)
     }
 
@@ -377,27 +431,38 @@ impl PolymarketClient {
     /// Returns event slugs that have neg_risk=true and multiple markets.
     pub async fn get_neg_risk_events(&self, limit: u32) -> EngineResult<Vec<Value>> {
         let url = format!("{}/events", self.gamma_url);
-        let data = self.get_with_retry(&url, &[
-            ("limit", limit.to_string()),
-            ("active", "true".to_string()),
-            ("closed", "false".to_string()),
-        ]).await?;
+        let data = self
+            .get_with_retry(
+                &url,
+                &[
+                    ("limit", limit.to_string()),
+                    ("active", "true".to_string()),
+                    ("closed", "false".to_string()),
+                ],
+            )
+            .await?;
 
-        let events = data.as_array().ok_or_else(|| {
-            EngineError::PolymarketParse("Expected array from /events".into())
-        })?;
+        let events = data
+            .as_array()
+            .ok_or_else(|| EngineError::PolymarketParse("Expected array from /events".into()))?;
 
         let neg_risk_events: Vec<Value> = events
             .iter()
             .filter(|e| {
                 let is_neg = e["negRisk"].as_bool().unwrap_or(false);
-                let has_markets = e["markets"].as_array().map(|m| m.len() >= 2).unwrap_or(false);
+                let has_markets = e["markets"]
+                    .as_array()
+                    .map(|m| m.len() >= 2)
+                    .unwrap_or(false);
                 is_neg && has_markets
             })
             .cloned()
             .collect();
 
-        info!("Found {} neg-risk multi-outcome events", neg_risk_events.len());
+        info!(
+            "Found {} neg-risk multi-outcome events",
+            neg_risk_events.len()
+        );
         Ok(neg_risk_events)
     }
 
@@ -405,9 +470,9 @@ impl PolymarketClient {
     /// Returns (best_ask_price, size_available_at_best_ask).
     pub async fn get_ask_depth(&self, token_id: &str) -> EngineResult<(f64, f64)> {
         let book = self.get_order_book(token_id).await?;
-        let asks = book["asks"].as_array().ok_or_else(|| {
-            EngineError::PolymarketParse("No asks array in orderbook".into())
-        })?;
+        let asks = book["asks"]
+            .as_array()
+            .ok_or_else(|| EngineError::PolymarketParse("No asks array in orderbook".into()))?;
 
         if asks.is_empty() {
             return Err(EngineError::PolymarketParse("Asks array is empty".into()));
@@ -425,9 +490,9 @@ impl PolymarketClient {
     /// Returns (best_bid_price, size_available_at_best_bid).
     pub async fn get_bid_depth(&self, token_id: &str) -> EngineResult<(f64, f64)> {
         let book = self.get_order_book(token_id).await?;
-        let bids = book["bids"].as_array().ok_or_else(|| {
-            EngineError::PolymarketParse("No bids array in orderbook".into())
-        })?;
+        let bids = book["bids"]
+            .as_array()
+            .ok_or_else(|| EngineError::PolymarketParse("No bids array in orderbook".into()))?;
 
         if bids.is_empty() {
             return Err(EngineError::PolymarketParse("Bids array is empty".into()));
@@ -482,7 +547,9 @@ impl PolymarketClient {
 pub fn parse_market(v: &Value) -> EngineResult<Market> {
     let id = v["id"].as_str().unwrap_or("").to_string();
     if id.is_empty() {
-        return Err(EngineError::PolymarketParse("Market missing 'id' field".into()));
+        return Err(EngineError::PolymarketParse(
+            "Market missing 'id' field".into(),
+        ));
     }
 
     Ok(Market {
@@ -492,12 +559,12 @@ pub fn parse_market(v: &Value) -> EngineResult<Market> {
         slug: v["slug"].as_str().map(String::from),
         end_date: v["endDate"].as_str().map(String::from),
         category: v["category"].as_str().map(String::from),
-        volume: v["volumeNum"].as_f64().or_else(|| {
-            v["volume"].as_str().and_then(|s| s.parse().ok())
-        }),
-        liquidity: v["liquidityNum"].as_f64().or_else(|| {
-            v["liquidity"].as_str().and_then(|s| s.parse().ok())
-        }),
+        volume: v["volumeNum"]
+            .as_f64()
+            .or_else(|| v["volume"].as_str().and_then(|s| s.parse().ok())),
+        liquidity: v["liquidityNum"]
+            .as_f64()
+            .or_else(|| v["liquidity"].as_str().and_then(|s| s.parse().ok())),
         outcome_prices: v["outcomePrices"].as_str().map(String::from),
         outcomes: v["outcomes"].as_str().map(String::from),
         active: v["active"].as_bool(),

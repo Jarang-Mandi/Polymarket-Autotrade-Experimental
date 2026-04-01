@@ -1,19 +1,21 @@
-use std::sync::Arc;
-use std::net::SocketAddr;
 use axum::{
-    extract::{State, ws::{WebSocket, WebSocketUpgrade, Message}},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
+    },
     response::IntoResponse,
     routing::{get, post},
-    Router,
-    Json,
+    Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
+use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{self, Duration};
-use tower_http::cors::{CorsLayer, Any};
+use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
 
-use crate::engine::{TradingEngine, EngineState};
+use crate::engine::{EngineState, TradingEngine};
 use crate::error::EngineError;
 use crate::types::*;
 
@@ -39,6 +41,7 @@ pub async fn start_dashboard_server(
         .route("/api/trades", get(get_trades))
         .route("/api/markets", get(get_markets))
         .route("/api/costs", get(get_costs))
+        .route("/api/risk-thresholds", get(get_risk_thresholds))
         .route("/api/health", get(health))
         // Arbitrage endpoints
         .route("/api/arb-opportunities", get(get_arb_opportunities))
@@ -47,6 +50,15 @@ pub async fn start_dashboard_server(
         // Command endpoints (OpenClaw → Engine)
         .route("/api/trade", post(post_trade))
         .route("/api/close", post(post_close))
+        .route("/api/ai-exit-review", post(post_ai_exit_review))
+        .route(
+            "/api/risk-thresholds/propose",
+            post(post_risk_thresholds_propose),
+        )
+        .route(
+            "/api/risk-thresholds/confirm",
+            post(post_risk_thresholds_confirm),
+        )
         .route("/api/report-cost", post(post_report_cost))
         .route("/api/execute-arb", post(post_execute_arb))
         .route("/api/arb-config", post(post_arb_config))
@@ -56,17 +68,25 @@ pub async fn start_dashboard_server(
         .with_state((state, engine));
 
     let addr_str = format!("{}:{}", host, port);
-    let addr: SocketAddr = addr_str.parse().map_err(|e| {
-        EngineError::ServerBind { addr: addr_str.clone(), reason: format!("Invalid address: {}", e) }
+    let addr: SocketAddr = addr_str.parse().map_err(|e| EngineError::ServerBind {
+        addr: addr_str.clone(),
+        reason: format!("Invalid address: {}", e),
     })?;
     info!("Dashboard + Command API on http://{}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-        EngineError::ServerBind { addr: addr.to_string(), reason: format!("Bind failed: {}", e) }
-    })?;
-    axum::serve(listener, app).await.map_err(|e| {
-        EngineError::ServerBind { addr: addr.to_string(), reason: format!("Server error: {}", e) }
-    })?;
+    let listener =
+        tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(|e| EngineError::ServerBind {
+                addr: addr.to_string(),
+                reason: format!("Bind failed: {}", e),
+            })?;
+    axum::serve(listener, app)
+        .await
+        .map_err(|e| EngineError::ServerBind {
+            addr: addr.to_string(),
+            reason: format!("Server error: {}", e),
+        })?;
 
     Ok(())
 }
@@ -75,9 +95,7 @@ pub async fn start_dashboard_server(
 // READ ENDPOINTS (GET)
 // ═══════════════════════════════════════════
 
-async fn get_state(
-    State((state, _)): State<(SharedState, SharedEngine)>,
-) -> impl IntoResponse {
+async fn get_state(State((state, _)): State<(SharedState, SharedEngine)>) -> impl IntoResponse {
     let s = state.read().await;
     Json(serde_json::json!({
         "capital": s.portfolio.capital,
@@ -102,27 +120,23 @@ async fn get_state(
         "api_budget_used_pct": s.api_costs.usage_pct(),
         "api_daily_cost": s.api_costs.daily_cost_usd,
         "api_total_cost": s.api_costs.total_cost_usd,
+        "risk_thresholds": s.risk_thresholds,
+        "pending_risk_threshold_proposal": s.pending_risk_threshold_proposal,
         "errors": s.errors.iter().rev().take(10).collect::<Vec<_>>(),
     }))
 }
 
-async fn get_positions(
-    State((state, _)): State<(SharedState, SharedEngine)>,
-) -> impl IntoResponse {
+async fn get_positions(State((state, _)): State<(SharedState, SharedEngine)>) -> impl IntoResponse {
     let s = state.read().await;
     Json(s.portfolio.positions.clone())
 }
 
-async fn get_trades(
-    State((state, _)): State<(SharedState, SharedEngine)>,
-) -> impl IntoResponse {
+async fn get_trades(State((state, _)): State<(SharedState, SharedEngine)>) -> impl IntoResponse {
     let s = state.read().await;
     Json(s.portfolio.recent_trades.clone())
 }
 
-async fn get_markets(
-    State((state, _)): State<(SharedState, SharedEngine)>,
-) -> impl IntoResponse {
+async fn get_markets(State((state, _)): State<(SharedState, SharedEngine)>) -> impl IntoResponse {
     let s = state.read().await;
     let markets: Vec<serde_json::Value> = s
         .cached_markets
@@ -150,9 +164,7 @@ async fn get_markets(
     Json(markets)
 }
 
-async fn get_costs(
-    State((state, _)): State<(SharedState, SharedEngine)>,
-) -> impl IntoResponse {
+async fn get_costs(State((state, _)): State<(SharedState, SharedEngine)>) -> impl IntoResponse {
     let s = state.read().await;
     let cache_denominator = s.api_costs.total_input_tokens + s.api_costs.total_cache_read_tokens;
     let cached_pct = if cache_denominator > 0 {
@@ -179,6 +191,16 @@ async fn get_costs(
         "output_tokens": s.api_costs.total_output_tokens,
         "cache_read_tokens": s.api_costs.total_cache_read_tokens,
         "cache_write_tokens": s.api_costs.total_cache_write_tokens,
+    }))
+}
+
+async fn get_risk_thresholds(
+    State((state, _)): State<(SharedState, SharedEngine)>,
+) -> impl IntoResponse {
+    let s = state.read().await;
+    Json(serde_json::json!({
+        "thresholds": s.risk_thresholds,
+        "pending_proposal": s.pending_risk_threshold_proposal,
     }))
 }
 
@@ -213,6 +235,33 @@ async fn post_close(
     Ok(Json(resp))
 }
 
+/// POST /api/ai-exit-review — AI requests exit reasoning and optional close execution
+async fn post_ai_exit_review(
+    State((_, engine)): State<(SharedState, SharedEngine)>,
+    Json(cmd): Json<AiExitReviewCommand>,
+) -> Result<Json<AiExitReviewResponse>, EngineError> {
+    let resp = engine.ai_exit_review(cmd).await?;
+    Ok(Json(resp))
+}
+
+/// POST /api/risk-thresholds/propose — propose SL/TP change (requires later confirmation)
+async fn post_risk_thresholds_propose(
+    State((_, engine)): State<(SharedState, SharedEngine)>,
+    Json(cmd): Json<ProposeRiskThresholdsCommand>,
+) -> Result<Json<RiskThresholdsUpdateResponse>, EngineError> {
+    let resp = engine.propose_risk_thresholds(cmd).await?;
+    Ok(Json(resp))
+}
+
+/// POST /api/risk-thresholds/confirm — user confirms/rejects pending SL/TP proposal
+async fn post_risk_thresholds_confirm(
+    State((_, engine)): State<(SharedState, SharedEngine)>,
+    Json(cmd): Json<ConfirmRiskThresholdsCommand>,
+) -> Result<Json<RiskThresholdsUpdateResponse>, EngineError> {
+    let resp = engine.confirm_risk_thresholds(cmd).await?;
+    Ok(Json(resp))
+}
+
 /// POST /api/report-cost — OpenClaw reports its Claude API usage for tracking
 async fn post_report_cost(
     State((_, engine)): State<(SharedState, SharedEngine)>,
@@ -231,7 +280,8 @@ async fn get_arb_opportunities(
     State((state, _)): State<(SharedState, SharedEngine)>,
 ) -> impl IntoResponse {
     let s = state.read().await;
-    let opps: Vec<serde_json::Value> = s.arb_opportunities
+    let opps: Vec<serde_json::Value> = s
+        .arb_opportunities
         .iter()
         .map(|o| {
             serde_json::json!({
@@ -261,9 +311,7 @@ async fn get_arb_opportunities(
 }
 
 /// GET /api/arb-stats — arbitrage scanner statistics
-async fn get_arb_stats(
-    State((state, _)): State<(SharedState, SharedEngine)>,
-) -> impl IntoResponse {
+async fn get_arb_stats(State((state, _)): State<(SharedState, SharedEngine)>) -> impl IntoResponse {
     let s = state.read().await;
     Json(serde_json::json!({
         "opportunities_found": s.arb_stats.opportunities_found,
@@ -312,9 +360,13 @@ async fn post_arb_config(
 ) -> Result<Json<serde_json::Value>, EngineError> {
     let mut s = state.write().await;
     s.arb_config = update;
-    info!("Arb config updated: enabled={}, min_profit={:.1}%, max_size=${:.2}",
-        s.arb_config.enabled, s.arb_config.min_profit_pct, s.arb_config.max_arb_size);
-    Ok(Json(serde_json::json!({ "ok": true, "message": "Arb config updated" })))
+    info!(
+        "Arb config updated: enabled={}, min_profit={:.1}%, max_size=${:.2}",
+        s.arb_config.enabled, s.arb_config.min_profit_pct, s.arb_config.max_arb_size
+    );
+    Ok(Json(
+        serde_json::json!({ "ok": true, "message": "Arb config updated" }),
+    ))
 }
 
 // ═══════════════════════════════════════════

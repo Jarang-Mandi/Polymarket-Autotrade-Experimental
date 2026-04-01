@@ -1,14 +1,14 @@
-use std::sync::Arc;
 use chrono::Utc;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{self, Duration};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::db::Database;
-use crate::error::{EngineError, EngineResult, log_error};
-use crate::types::*;
+use crate::error::{log_error, EngineError, EngineResult};
 use crate::polymarket::PolymarketClient;
+use crate::types::*;
 
 /// Core execution engine — the "hands" of the agent.
 /// OpenClaw (the "brain") makes decisions via Claude and sends commands here.
@@ -24,6 +24,8 @@ pub struct EngineState {
     pub portfolio: PortfolioState,
     pub api_costs: ApiCostTracker,
     pub cached_markets: Vec<Market>,
+    pub risk_thresholds: RiskThresholds,
+    pub pending_risk_threshold_proposal: Option<RiskThresholdProposal>,
     pub engine_running: bool,
     pub last_scan: Option<chrono::DateTime<Utc>>,
     pub last_command: Option<chrono::DateTime<Utc>>,
@@ -63,7 +65,10 @@ impl TradingEngine {
 
         if position_count > 0 || recovered_capital.is_some() {
             info!("STATE RECOVERED from SQLite:");
-            info!("  Capital: ${:.2} (initial: ${:.2})", capital, config.initial_capital);
+            info!(
+                "  Capital: ${:.2} (initial: ${:.2})",
+                capital, config.initial_capital
+            );
             info!("  Open positions: {}", position_count);
             info!("  Trade history: {} records", trade_count);
         }
@@ -75,7 +80,9 @@ impl TradingEngine {
                 total_pnl,
                 total_pnl_pct: if config.initial_capital > 0.0 {
                     (capital - config.initial_capital) / config.initial_capital * 100.0
-                } else { 0.0 },
+                } else {
+                    0.0
+                },
                 daily_pnl: 0.0,
                 agent_state: AgentState::from_capital(capital),
                 hunger_level: HungerLevel::Seeking,
@@ -92,6 +99,12 @@ impl TradingEngine {
             },
             api_costs: ApiCostTracker::new(config.daily_api_budget),
             cached_markets: vec![],
+            risk_thresholds: RiskThresholds {
+                stop_loss_pct: config.default_stop_loss_pct,
+                take_profit_pct: config.default_take_profit_pct,
+                auto_close_enabled: config.position_auto_close_enabled,
+            },
+            pending_risk_threshold_proposal: None,
             engine_running: false,
             last_scan: None,
             last_command: None,
@@ -116,6 +129,12 @@ impl TradingEngine {
         info!("=== POLYMARKET EXECUTION ENGINE STARTING ===");
         info!("Mode: COMMAND-DRIVEN (OpenClaw is the brain)");
         info!("Initial capital: ${:.2}", self.config.initial_capital);
+        info!(
+            "Exit policy: SL {:.1}% / TP {:.1}% / auto_close={} (AI-managed close recommended)",
+            self.config.default_stop_loss_pct,
+            self.config.default_take_profit_pct,
+            self.config.position_auto_close_enabled
+        );
 
         {
             let mut state = self.state.write().await;
@@ -155,7 +174,7 @@ impl TradingEngine {
         let mut scan_tick = time::interval(scan_interval);
         let mut position_tick = time::interval(position_interval);
         let mut snapshot_tick = time::interval(Duration::from_secs(3600)); // hourly
-        let mut arb_tick = time::interval(Duration::from_secs(60));       // arb scan every 60s
+        let mut arb_tick = time::interval(Duration::from_secs(60)); // arb scan every 60s
 
         loop {
             tokio::select! {
@@ -199,7 +218,10 @@ impl TradingEngine {
                 let mut state = self.state.write().await;
                 state.cached_markets = markets;
                 state.last_scan = Some(Utc::now());
-                info!("Cached {} markets (available via GET /api/markets)", state.cached_markets.len());
+                info!(
+                    "Cached {} markets (available via GET /api/markets)",
+                    state.cached_markets.len()
+                );
             }
             Err(e) => {
                 log_error(&e);
@@ -220,21 +242,23 @@ impl TradingEngine {
     // ═══════════════════════════════════════════
 
     /// Validate a trade command before execution
-    fn validate_trade_command(&self, cmd: &TradeCommand, capital: f64, state: &AgentState) -> EngineResult<()> {
+    fn validate_trade_command(
+        &self,
+        cmd: &TradeCommand,
+        capital: f64,
+        state: &AgentState,
+    ) -> EngineResult<()> {
         if cmd.price <= 0.0 || cmd.price >= 1.0 {
-            return Err(EngineError::BadRequest(
-                format!("Price {:.3} must be between 0 and 1", cmd.price),
-            ));
+            return Err(EngineError::BadRequest(format!(
+                "Price {:.3} must be between 0 and 1",
+                cmd.price
+            )));
         }
         if cmd.size <= 0.0 {
-            return Err(EngineError::BadRequest(
-                "Size must be positive".into(),
-            ));
+            return Err(EngineError::BadRequest("Size must be positive".into()));
         }
         if cmd.market_id.is_empty() {
-            return Err(EngineError::BadRequest(
-                "market_id is required".into(),
-            ));
+            return Err(EngineError::BadRequest("market_id is required".into()));
         }
         let min_edge = state.min_edge();
         if cmd.edge < min_edge {
@@ -260,11 +284,18 @@ impl TradingEngine {
 
     /// Execute a trade command from OpenClaw
     pub async fn handle_trade_command(&self, cmd: TradeCommand) -> EngineResult<CommandResponse> {
-        info!("TRADE COMMAND: {:?} {} @ {:.3} on {}", cmd.side, cmd.size, cmd.price, cmd.market_id);
+        info!(
+            "TRADE COMMAND: {:?} {} @ {:.3} on {}",
+            cmd.side, cmd.size, cmd.price, cmd.market_id
+        );
 
         // Read state for validation
         let state = self.state.read().await;
-        let mut market = state.cached_markets.iter().find(|m| m.id == cmd.market_id).cloned();
+        let mut market = state
+            .cached_markets
+            .iter()
+            .find(|m| m.id == cmd.market_id)
+            .cloned();
         let max_size = state.portfolio.capital * state.portfolio.agent_state.max_position_pct();
         let capital = state.portfolio.capital;
         let agent_state = state.portfolio.agent_state;
@@ -295,7 +326,10 @@ impl TradingEngine {
         // fetch it directly by ID from Gamma so command-driven dry-runs can proceed.
         if market.is_none() {
             if let Some(fetched) = self.polymarket.get_market_by_id(&cmd.market_id).await? {
-                info!("Market {} loaded directly from Gamma (not in cache)", cmd.market_id);
+                info!(
+                    "Market {} loaded directly from Gamma (not in cache)",
+                    cmd.market_id
+                );
                 let mut state = self.state.write().await;
                 if !state.cached_markets.iter().any(|m| m.id == fetched.id) {
                     state.cached_markets.push(fetched.clone());
@@ -305,7 +339,8 @@ impl TradingEngine {
         }
 
         let market = market.ok_or_else(|| EngineError::MarketNotFound(cmd.market_id.clone()))?;
-        let (yes_id, no_id) = market.token_ids()
+        let (yes_id, no_id) = market
+            .token_ids()
             .ok_or_else(|| EngineError::NoTokenIds(cmd.market_id.clone()))?;
         let token_id = match cmd.side {
             Side::Buy => yes_id,
@@ -313,7 +348,8 @@ impl TradingEngine {
         };
         let question = market.question.clone().unwrap_or_default();
 
-        let tick_size = market.order_price_min_tick_size
+        let tick_size = market
+            .order_price_min_tick_size
             .map(|t| format!("{:.3}", t))
             .unwrap_or_else(|| "0.01".to_string());
 
@@ -393,11 +429,17 @@ impl TradingEngine {
             warn!("DB save_portfolio_stats failed: {}", e);
         }
 
-        info!("TRADE EXECUTED: {:?} ${:.2} @ {:.3}", cmd.side, actual_size, cmd.price);
+        info!(
+            "TRADE EXECUTED: {:?} ${:.2} @ {:.3}",
+            cmd.side, actual_size, cmd.price
+        );
 
         Ok(CommandResponse {
             success: true,
-            message: format!("Executed {:?} ${:.2} @ {:.3}", cmd.side, actual_size, cmd.price),
+            message: format!(
+                "Executed {:?} ${:.2} @ {:.3}",
+                cmd.side, actual_size, cmd.price
+            ),
             trade_id: Some(trade_id),
             position_id: Some(position_id),
         })
@@ -405,7 +447,10 @@ impl TradingEngine {
 
     /// Close a position by command from OpenClaw
     pub async fn handle_close_command(&self, cmd: CloseCommand) -> EngineResult<CommandResponse> {
-        info!("CLOSE COMMAND: position {} — {}", cmd.position_id, cmd.reason);
+        info!(
+            "CLOSE COMMAND: position {} — {}",
+            cmd.position_id, cmd.reason
+        );
 
         if cmd.position_id.is_empty() {
             return Err(EngineError::BadRequest("position_id is required".into()));
@@ -413,13 +458,22 @@ impl TradingEngine {
 
         let mut state = self.state.write().await;
 
-        let pos_idx = state.portfolio.positions.iter().position(|p| p.id == cmd.position_id)
+        let pos_idx = state
+            .portfolio
+            .positions
+            .iter()
+            .position(|p| p.id == cmd.position_id)
             .ok_or_else(|| EngineError::PositionNotFound(cmd.position_id.clone()))?;
 
         let (pid, cost_basis, pnl, pnl_pct) = {
             let pos = &mut state.portfolio.positions[pos_idx];
             pos.status = PositionStatus::Closed;
-            (pos.id.clone(), pos.cost_basis, pos.unrealized_pnl, pos.pnl_pct())
+            (
+                pos.id.clone(),
+                pos.cost_basis,
+                pos.unrealized_pnl,
+                pos.pnl_pct(),
+            )
         };
 
         state.portfolio.capital += cost_basis + pnl;
@@ -443,7 +497,10 @@ impl TradingEngine {
             warn!("DB close_position failed: {}", e);
         }
 
-        state.portfolio.positions.retain(|p| p.status == PositionStatus::Open);
+        state
+            .portfolio
+            .positions
+            .retain(|p| p.status == PositionStatus::Open);
         state.last_command = Some(Utc::now());
 
         // Persist capital + stats
@@ -462,6 +519,224 @@ impl TradingEngine {
         })
     }
 
+    /// Create a pending SL/TP policy proposal.
+    /// Nothing is applied until user confirmation arrives.
+    pub async fn propose_risk_thresholds(
+        &self,
+        cmd: ProposeRiskThresholdsCommand,
+    ) -> EngineResult<RiskThresholdsUpdateResponse> {
+        if cmd.stop_loss_pct <= 0.0 || cmd.stop_loss_pct >= 100.0 {
+            return Err(EngineError::BadRequest(
+                "stop_loss_pct must be between 0 and 100".into(),
+            ));
+        }
+        if cmd.take_profit_pct <= 0.0 || cmd.take_profit_pct >= 100.0 {
+            return Err(EngineError::BadRequest(
+                "take_profit_pct must be between 0 and 100".into(),
+            ));
+        }
+
+        let proposed_by = if cmd.proposed_by.trim().is_empty() {
+            "ai"
+        } else {
+            cmd.proposed_by.trim()
+        };
+        let reason = if cmd.reason.trim().is_empty() {
+            "AI requested SL/TP policy adjustment"
+        } else {
+            cmd.reason.trim()
+        };
+
+        let mut state = self.state.write().await;
+        let proposal = RiskThresholdProposal::new(
+            cmd.stop_loss_pct,
+            cmd.take_profit_pct,
+            cmd.auto_close_enabled,
+            proposed_by,
+            reason,
+        );
+        let proposal_id = proposal.id.clone();
+        state.pending_risk_threshold_proposal = Some(proposal.clone());
+
+        Ok(RiskThresholdsUpdateResponse {
+            success: true,
+            message: "Risk threshold proposal created. Awaiting explicit user confirmation.".into(),
+            requires_confirmation: true,
+            applied: false,
+            proposal_id: Some(proposal_id),
+            thresholds: state.risk_thresholds.clone(),
+            pending_proposal: Some(proposal),
+        })
+    }
+
+    /// Confirm or reject a pending SL/TP policy proposal.
+    pub async fn confirm_risk_thresholds(
+        &self,
+        cmd: ConfirmRiskThresholdsCommand,
+    ) -> EngineResult<RiskThresholdsUpdateResponse> {
+        if cmd.proposal_id.trim().is_empty() {
+            return Err(EngineError::BadRequest("proposal_id is required".into()));
+        }
+
+        let mut state = self.state.write().await;
+        let pending = state
+            .pending_risk_threshold_proposal
+            .clone()
+            .ok_or_else(|| {
+                EngineError::BadRequest("No pending SL/TP proposal to confirm".into())
+            })?;
+
+        if pending.id != cmd.proposal_id {
+            return Err(EngineError::BadRequest(format!(
+                "Proposal ID mismatch. Pending proposal is {}",
+                pending.id
+            )));
+        }
+
+        if !cmd.approved {
+            state.pending_risk_threshold_proposal = None;
+            return Ok(RiskThresholdsUpdateResponse {
+                success: true,
+                message: format!(
+                    "SL/TP proposal {} rejected by {}",
+                    cmd.proposal_id, cmd.confirmed_by
+                ),
+                requires_confirmation: false,
+                applied: false,
+                proposal_id: Some(cmd.proposal_id),
+                thresholds: state.risk_thresholds.clone(),
+                pending_proposal: None,
+            });
+        }
+
+        state.risk_thresholds.stop_loss_pct = pending.proposed_stop_loss_pct;
+        state.risk_thresholds.take_profit_pct = pending.proposed_take_profit_pct;
+        state.risk_thresholds.auto_close_enabled = pending.proposed_auto_close_enabled;
+        state.pending_risk_threshold_proposal = None;
+
+        Ok(RiskThresholdsUpdateResponse {
+            success: true,
+            message: format!(
+                "SL/TP policy updated by {} (SL {:.1}% / TP {:.1}% / auto_close={})",
+                cmd.confirmed_by,
+                state.risk_thresholds.stop_loss_pct,
+                state.risk_thresholds.take_profit_pct,
+                state.risk_thresholds.auto_close_enabled
+            ),
+            requires_confirmation: false,
+            applied: true,
+            proposal_id: Some(cmd.proposal_id),
+            thresholds: state.risk_thresholds.clone(),
+            pending_proposal: None,
+        })
+    }
+
+    /// AI-managed exit reasoning based on current position metrics + active SL/TP policy.
+    /// If execute_close=true and recommendation is CLOSE, the engine sends a close command.
+    pub async fn ai_exit_review(
+        &self,
+        cmd: AiExitReviewCommand,
+    ) -> EngineResult<AiExitReviewResponse> {
+        if cmd.position_id.trim().is_empty() {
+            return Err(EngineError::BadRequest("position_id is required".into()));
+        }
+
+        let (position, thresholds, market_end_date, position_count, capital) = {
+            let state = self.state.read().await;
+            let position = state
+                .portfolio
+                .positions
+                .iter()
+                .find(|p| p.id == cmd.position_id)
+                .cloned()
+                .ok_or_else(|| EngineError::PositionNotFound(cmd.position_id.clone()))?;
+            let end_date = state
+                .cached_markets
+                .iter()
+                .find(|m| m.id == position.market_id)
+                .and_then(|m| m.end_date.clone());
+            (
+                position,
+                state.risk_thresholds.clone(),
+                end_date,
+                state.portfolio.positions.len(),
+                state.portfolio.capital,
+            )
+        };
+
+        let pnl_pct = position.pnl_pct();
+        let mut should_close = false;
+        let mut recommended_reason = "HOLD_SKILL".to_string();
+        let mut reasoning = vec![
+            format!(
+                "quant-risk-engine: pnl={:.2}% vs SL=-{:.2}% TP=+{:.2}%",
+                pnl_pct, thresholds.stop_loss_pct, thresholds.take_profit_pct
+            ),
+            format!(
+                "risk-allocation: open_positions={} available_capital=${:.2}",
+                position_count, capital
+            ),
+            format!(
+                "execute-mode: auto_close_enabled={} (manual AI close preferred)",
+                thresholds.auto_close_enabled
+            ),
+        ];
+
+        if pnl_pct <= -thresholds.stop_loss_pct {
+            should_close = true;
+            recommended_reason = "AI_STOP_LOSS_SKILL".into();
+        } else if pnl_pct >= thresholds.take_profit_pct {
+            should_close = true;
+            recommended_reason = "AI_TAKE_PROFIT_SKILL".into();
+        } else if let Some(end_date) = market_end_date {
+            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&end_date) {
+                let secs_left = (parsed.with_timezone(&Utc) - Utc::now()).num_seconds();
+                reasoning.push(format!(
+                    "market-regime: secs_left={} for market resolution window",
+                    secs_left
+                ));
+                if secs_left <= 120 {
+                    should_close = true;
+                    recommended_reason = "AI_TIME_BASED_EXIT_SKILL".into();
+                }
+            }
+        }
+
+        if let Some(ctx) = cmd.context.as_ref() {
+            if !ctx.trim().is_empty() {
+                reasoning.push(format!("ai-context: {}", ctx.trim()));
+            }
+        }
+
+        let mut executed_close = false;
+        let mut close_response = None;
+        if cmd.execute_close && should_close {
+            let close_cmd = CloseCommand {
+                position_id: cmd.position_id.clone(),
+                reason: recommended_reason.clone(),
+            };
+            let resp = self.handle_close_command(close_cmd).await?;
+            executed_close = resp.success;
+            close_response = Some(resp);
+        }
+
+        Ok(AiExitReviewResponse {
+            success: true,
+            position_id: cmd.position_id,
+            should_close,
+            recommended_reason,
+            reasoning,
+            entry_price: position.entry_price,
+            current_price: position.current_price,
+            pnl_pct,
+            stop_loss_pct: thresholds.stop_loss_pct,
+            take_profit_pct: thresholds.take_profit_pct,
+            auto_close_enabled: thresholds.auto_close_enabled,
+            executed_close,
+            close_response,
+        })
+    }
+
     /// Report API cost from OpenClaw (for dashboard tracking)
     pub async fn handle_cost_report(&self, report: ApiCostReport) {
         let mut state = self.state.write().await;
@@ -477,7 +752,12 @@ impl TradingEngine {
     /// Push error to state (visible on dashboard)
     async fn push_error(&self, err: &EngineError) -> EngineResult<()> {
         let mut state = self.state.write().await;
-        let entry = format!("[{}] {}: {}", Utc::now().format("%H:%M:%S"), err.code(), err);
+        let entry = format!(
+            "[{}] {}: {}",
+            Utc::now().format("%H:%M:%S"),
+            err.code(),
+            err
+        );
         state.errors.push(entry);
         // Keep last 50 errors
         if state.errors.len() > 50 {
@@ -541,7 +821,9 @@ impl TradingEngine {
         opportunities.sort_by(|a, b| {
             let score_a = a.profit_pct * a.liquidity_score;
             let score_b = b.profit_pct * b.liquidity_score;
-            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Keep top 20
@@ -566,7 +848,8 @@ impl TradingEngine {
     async fn scan_binary_arbs(&self) -> EngineResult<Vec<ArbitrageOpportunity>> {
         let (markets, config) = {
             let state = self.state.read().await;
-            let markets: Vec<Market> = state.cached_markets
+            let markets: Vec<Market> = state
+                .cached_markets
                 .iter()
                 .filter(|m| {
                     // Only binary markets (not neg-risk multi-outcome)
@@ -587,7 +870,10 @@ impl TradingEngine {
             let (yes_id, no_id) = match market.token_ids() {
                 Some(ids) => ids,
                 None => {
-                    warn!("Skipping binary market {}: missing YES/NO token IDs", market.id);
+                    warn!(
+                        "Skipping binary market {}: missing YES/NO token IDs",
+                        market.id
+                    );
                     continue;
                 }
             };
@@ -596,7 +882,10 @@ impl TradingEngine {
             let (yes_ask, no_ask) = match self.polymarket.get_binary_prices(&yes_id, &no_id).await {
                 Ok(prices) => prices,
                 Err(e) => {
-                    warn!("Skipping binary market {}: orderbook unavailable ({})", market.id, e);
+                    warn!(
+                        "Skipping binary market {}: orderbook unavailable ({})",
+                        market.id, e
+                    );
                     continue;
                 } // Skip markets with no orderbook depth
             };
@@ -715,7 +1004,10 @@ impl TradingEngine {
                 let (yes_id, _no_id) = match market.token_ids() {
                     Some(ids) => ids,
                     None => {
-                        warn!("Skipping event {} market {}: missing token IDs", slug, market.id);
+                        warn!(
+                            "Skipping event {} market {}: missing token IDs",
+                            slug, market.id
+                        );
                         all_ok = false;
                         break;
                     }
@@ -777,7 +1069,10 @@ impl TradingEngine {
             if profit_pct >= config.min_profit_pct && sum_yes_asks < 1.0 {
                 info!(
                     "MULTI-OUTCOME ARB DETECTED: '{}' | {} markets | sum={:.4} | profit={:.2}%",
-                    title, legs.len(), sum_yes_asks, profit_pct
+                    title,
+                    legs.len(),
+                    sum_yes_asks,
+                    profit_pct
                 );
 
                 arbs.push(ArbitrageOpportunity {
@@ -806,7 +1101,8 @@ impl TradingEngine {
     async fn scan_spread_capture(&self) -> EngineResult<Vec<ArbitrageOpportunity>> {
         let (markets, config) = {
             let state = self.state.read().await;
-            let markets: Vec<Market> = state.cached_markets
+            let markets: Vec<Market> = state
+                .cached_markets
                 .iter()
                 .filter(|m| {
                     m.enable_order_book.unwrap_or(false)
@@ -836,7 +1132,7 @@ impl TradingEngine {
             let spread = ask - bid;
 
             if spread >= config.min_spread {
-                let buy_price = bid + 0.01;  // improve bid by 1 tick
+                let buy_price = bid + 0.01; // improve bid by 1 tick
                 let sell_price = ask - 0.01; // improve ask by 1 tick
                 let expected_profit = sell_price - buy_price;
                 let profit_pct = if buy_price > 0.0 {
@@ -890,19 +1186,26 @@ impl TradingEngine {
 
     /// Execute a detected arbitrage opportunity.
     /// Places orders for all legs and tracks execution.
-    pub async fn handle_execute_arb(&self, cmd: ExecuteArbCommand) -> EngineResult<ArbExecutionResponse> {
+    pub async fn handle_execute_arb(
+        &self,
+        cmd: ExecuteArbCommand,
+    ) -> EngineResult<ArbExecutionResponse> {
         info!("ARB EXECUTE: {}", cmd.opportunity_id);
 
         let (opp, config, capital) = {
             let state = self.state.read().await;
 
-            let opp = state.arb_opportunities
+            let opp = state
+                .arb_opportunities
                 .iter()
                 .find(|o| o.id == cmd.opportunity_id)
                 .cloned()
-                .ok_or_else(|| EngineError::BadRequest(
-                    format!("Arb opportunity {} not found", cmd.opportunity_id)
-                ))?;
+                .ok_or_else(|| {
+                    EngineError::BadRequest(format!(
+                        "Arb opportunity {} not found",
+                        cmd.opportunity_id
+                    ))
+                })?;
 
             if opp.status != ArbStatus::Detected {
                 return Err(EngineError::BadRequest(format!(
@@ -920,16 +1223,21 @@ impl TradingEngine {
             return Err(EngineError::BadRequest("Invalid arb cost".into()));
         }
         if opp.legs.is_empty() {
-            return Err(EngineError::BadRequest("Arb opportunity has no legs".into()));
+            return Err(EngineError::BadRequest(
+                "Arb opportunity has no legs".into(),
+            ));
         }
 
-        let max_units = (max_affordable / unit_cost).floor().min(config.max_arb_size / unit_cost);
+        let max_units = (max_affordable / unit_cost)
+            .floor()
+            .min(config.max_arb_size / unit_cost);
         if !max_units.is_finite() || max_units <= 0.0 {
             return Err(EngineError::BadRequest(
                 "Insufficient capital for arb minimum unit".into(),
             ));
         }
-        let actual_units = cmd.size_override
+        let actual_units = cmd
+            .size_override
             .map(|s| s.min(max_units).max(1.0))
             .unwrap_or_else(|| max_units.min(5.0).max(1.0)); // default: up to $5 worth
 
@@ -937,7 +1245,9 @@ impl TradingEngine {
         let expected_profit = actual_units * opp.profit;
 
         if !total_cost.is_finite() || total_cost <= 0.0 {
-            return Err(EngineError::BadRequest("Invalid computed arb total_cost".into()));
+            return Err(EngineError::BadRequest(
+                "Invalid computed arb total_cost".into(),
+            ));
         }
 
         if total_cost > capital * 0.95 {
@@ -953,18 +1263,22 @@ impl TradingEngine {
             let mut state = self.state.write().await;
 
             if state.active_arb_count >= state.arb_config.max_concurrent_arbs {
-                return Err(EngineError::BadRequest(
-                    format!("Max concurrent arbs ({}) reached", state.arb_config.max_concurrent_arbs)
-                ));
+                return Err(EngineError::BadRequest(format!(
+                    "Max concurrent arbs ({}) reached",
+                    state.arb_config.max_concurrent_arbs
+                )));
             }
 
             let opp_mut = state
                 .arb_opportunities
                 .iter_mut()
                 .find(|o| o.id == cmd.opportunity_id)
-                .ok_or_else(|| EngineError::BadRequest(
-                    format!("Arb opportunity {} no longer available", cmd.opportunity_id)
-                ))?;
+                .ok_or_else(|| {
+                    EngineError::BadRequest(format!(
+                        "Arb opportunity {} no longer available",
+                        cmd.opportunity_id
+                    ))
+                })?;
 
             if opp_mut.status != ArbStatus::Detected {
                 return Err(EngineError::BadRequest(format!(
@@ -1049,7 +1363,11 @@ impl TradingEngine {
                     ((state.arb_stats.avg_profit_pct * (n - 1.0)) + opp.profit_pct) / n
                 };
 
-                if let Some(o) = state.arb_opportunities.iter_mut().find(|o| o.id == cmd.opportunity_id) {
+                if let Some(o) = state
+                    .arb_opportunities
+                    .iter_mut()
+                    .find(|o| o.id == cmd.opportunity_id)
+                {
                     o.status = ArbStatus::Filled;
                 }
             } else if legs_filled > 0 {
@@ -1058,11 +1376,19 @@ impl TradingEngine {
                 let filled_cost = (legs_filled as f64 / opp.legs.len() as f64) * total_cost;
                 state.portfolio.capital -= filled_cost;
 
-                if let Some(o) = state.arb_opportunities.iter_mut().find(|o| o.id == cmd.opportunity_id) {
+                if let Some(o) = state
+                    .arb_opportunities
+                    .iter_mut()
+                    .find(|o| o.id == cmd.opportunity_id)
+                {
                     o.status = ArbStatus::PartialFill;
                 }
             } else {
-                if let Some(o) = state.arb_opportunities.iter_mut().find(|o| o.id == cmd.opportunity_id) {
+                if let Some(o) = state
+                    .arb_opportunities
+                    .iter_mut()
+                    .find(|o| o.id == cmd.opportunity_id)
+                {
                     o.status = ArbStatus::Failed;
                 }
             }
@@ -1091,12 +1417,15 @@ impl TradingEngine {
         } else if legs_filled > 0 {
             format!(
                 "Arb partial: {}/{} legs filled ({})",
-                legs_filled, opp.legs.len(), opp.arb_type.label()
+                legs_filled,
+                opp.legs.len(),
+                opp.arb_type.label()
             )
         } else {
             format!(
                 "Arb failed: 0/{} legs filled ({})",
-                opp.legs.len(), opp.arb_type.label()
+                opp.legs.len(),
+                opp.arb_type.label()
             )
         };
 
@@ -1117,7 +1446,9 @@ impl TradingEngine {
     // POSITION MONITORING (background loop)
     // ═══════════════════════════════════════════
 
-    /// Update existing position prices + auto stop-loss/take-profit
+    /// Update existing position prices.
+    /// If auto_close_enabled=false, exits are fully manual/AI-commanded.
+    /// If auto_close_enabled=true, background SL/TP auto-close is allowed.
     async fn update_positions(&self) {
         let mut state = self.state.write().await;
 
@@ -1125,6 +1456,7 @@ impl TradingEngine {
             return;
         }
 
+        let thresholds = state.risk_thresholds.clone();
         let mut positions_to_close: Vec<String> = vec![];
 
         for pos in &mut state.portfolio.positions {
@@ -1134,17 +1466,26 @@ impl TradingEngine {
 
             // TODO: fetch real midpoint from CLOB per token_id
             // self.polymarket.get_midpoint(&pos.token_id).await
-            let price_change = (chrono::Utc::now().timestamp_millis() % 100) as f64 / 10000.0 - 0.005;
+            let price_change =
+                (chrono::Utc::now().timestamp_millis() % 100) as f64 / 10000.0 - 0.005;
             let new_price = (pos.current_price + price_change).clamp(0.01, 0.99);
             pos.update_price(new_price);
 
-            let pnl_pct = pos.pnl_pct();
-            if pnl_pct <= -15.0 {
-                info!("STOP LOSS triggered: {} ({:.1}%)", pos.id, pnl_pct);
-                positions_to_close.push(pos.id.clone());
-            } else if pnl_pct >= 30.0 {
-                info!("TAKE PROFIT triggered: {} ({:.1}%)", pos.id, pnl_pct);
-                positions_to_close.push(pos.id.clone());
+            if thresholds.auto_close_enabled {
+                let pnl_pct = pos.pnl_pct();
+                if pnl_pct <= -thresholds.stop_loss_pct {
+                    info!(
+                        "AUTO STOP LOSS triggered: {} ({:.1}% <= -{:.1}%)",
+                        pos.id, pnl_pct, thresholds.stop_loss_pct
+                    );
+                    positions_to_close.push(pos.id.clone());
+                } else if pnl_pct >= thresholds.take_profit_pct {
+                    info!(
+                        "AUTO TAKE PROFIT triggered: {} ({:.1}% >= +{:.1}%)",
+                        pos.id, pnl_pct, thresholds.take_profit_pct
+                    );
+                    positions_to_close.push(pos.id.clone());
+                }
             }
         }
 
@@ -1171,8 +1512,9 @@ impl TradingEngine {
                 }
 
                 if state.portfolio.total_trades > 0 {
-                    state.portfolio.win_rate =
-                        state.portfolio.winning_trades as f64 / state.portfolio.total_trades as f64 * 100.0;
+                    state.portfolio.win_rate = state.portfolio.winning_trades as f64
+                        / state.portfolio.total_trades as f64
+                        * 100.0;
                 }
 
                 // Persist auto-close to SQLite
@@ -1182,7 +1524,10 @@ impl TradingEngine {
             }
         }
 
-        state.portfolio.positions.retain(|p| p.status == PositionStatus::Open);
+        state
+            .portfolio
+            .positions
+            .retain(|p| p.status == PositionStatus::Open);
 
         // Persist updated capital after auto-closes
         if !positions_to_close.is_empty() {
@@ -1195,7 +1540,9 @@ impl TradingEngine {
         }
 
         state.portfolio.total_pnl_pct = if state.portfolio.initial_capital > 0.0 {
-            (state.portfolio.capital - state.portfolio.initial_capital) / state.portfolio.initial_capital * 100.0
+            (state.portfolio.capital - state.portfolio.initial_capital)
+                / state.portfolio.initial_capital
+                * 100.0
         } else {
             0.0
         };

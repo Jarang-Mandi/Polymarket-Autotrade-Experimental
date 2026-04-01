@@ -1,7 +1,7 @@
+use chrono::{DateTime, Utc};
+use rusqlite::{params, Connection};
 use std::path::Path;
 use std::sync::Mutex;
-use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
 use tracing::{info, warn};
 
 use crate::error::{EngineError, EngineResult};
@@ -22,14 +22,12 @@ impl Database {
     pub fn open(path: &str) -> EngineResult<Self> {
         // Ensure directory exists
         if let Some(parent) = Path::new(path).parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                EngineError::Database(format!("Cannot create db directory: {}", e))
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| EngineError::Database(format!("Cannot create db directory: {}", e)))?;
         }
 
-        let conn = Connection::open(path).map_err(|e| {
-            EngineError::Database(format!("Failed to open {}: {}", path, e))
-        })?;
+        let conn = Connection::open(path)
+            .map_err(|e| EngineError::Database(format!("Failed to open {}: {}", path, e)))?;
 
         // Performance pragmas for single-writer trading engine
         conn.execute_batch(
@@ -37,10 +35,13 @@ impl Database {
              PRAGMA synchronous = NORMAL;
              PRAGMA busy_timeout = 5000;
              PRAGMA cache_size = -2000;
-             PRAGMA foreign_keys = ON;"
-        ).map_err(|e| EngineError::Database(format!("Pragma failed: {}", e)))?;
+             PRAGMA foreign_keys = ON;",
+        )
+        .map_err(|e| EngineError::Database(format!("Pragma failed: {}", e)))?;
 
-        let db = Self { conn: Mutex::new(conn) };
+        let db = Self {
+            conn: Mutex::new(conn),
+        };
         db.migrate()?;
 
         info!("SQLite database ready: {}", path);
@@ -49,9 +50,10 @@ impl Database {
 
     /// Run schema migrations
     fn migrate(&self) -> EngineResult<()> {
-        let conn = self.conn.lock().map_err(|e| {
-            EngineError::Database(format!("Lock poisoned: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| EngineError::Database(format!("Lock poisoned: {}", e)))?;
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS trades (
@@ -127,8 +129,9 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_trades_created ON trades(created_at);
             CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
             CREATE INDEX IF NOT EXISTS idx_snapshots_created ON portfolio_snapshots(created_at);
-            "
-        ).map_err(|e| EngineError::Database(format!("Migration failed: {}", e)))?;
+            ",
+        )
+        .map_err(|e| EngineError::Database(format!("Migration failed: {}", e)))?;
 
         info!("Database migrations applied");
         Ok(())
@@ -169,7 +172,8 @@ impl Database {
         conn.execute(
             "UPDATE trades SET status = 'Closed', pnl = ?1, closed_at = ?2 WHERE id = ?3",
             params![pnl, Utc::now().to_rfc3339(), trade_id],
-        ).map_err(|e| EngineError::Database(format!("Close trade failed: {}", e)))?;
+        )
+        .map_err(|e| EngineError::Database(format!("Close trade failed: {}", e)))?;
         Ok(())
     }
 
@@ -181,23 +185,25 @@ impl Database {
              FROM trades ORDER BY created_at DESC LIMIT ?1"
         ).map_err(|e| EngineError::Database(format!("Prepare failed: {}", e)))?;
 
-        let trades = stmt.query_map(params![limit as i64], |row| {
-            Ok(TradeLog {
-                id: row.get(0)?,
-                market_id: row.get(1)?,
-                market_question: row.get(2)?,
-                side: parse_side(&row.get::<_, String>(3)?),
-                price: row.get(4)?,
-                size: row.get(5)?,
-                cost: row.get(6)?,
-                status: parse_trade_status(&row.get::<_, String>(7)?),
-                reason: row.get(8)?,
-                edge: row.get(9)?,
-                confidence: row.get(10)?,
-                api_cost: row.get(11)?,
-                timestamp: parse_datetime(&row.get::<_, String>(12)?),
+        let trades = stmt
+            .query_map(params![limit as i64], |row| {
+                Ok(TradeLog {
+                    id: row.get(0)?,
+                    market_id: row.get(1)?,
+                    market_question: row.get(2)?,
+                    side: parse_side(&row.get::<_, String>(3)?),
+                    price: row.get(4)?,
+                    size: row.get(5)?,
+                    cost: row.get(6)?,
+                    status: parse_trade_status(&row.get::<_, String>(7)?),
+                    reason: row.get(8)?,
+                    edge: row.get(9)?,
+                    confidence: row.get(10)?,
+                    api_cost: row.get(11)?,
+                    timestamp: parse_datetime(&row.get::<_, String>(12)?),
+                })
             })
-        }).map_err(|e| EngineError::Database(format!("Query trades failed: {}", e)))?;
+            .map_err(|e| EngineError::Database(format!("Query trades failed: {}", e)))?;
 
         let mut result = Vec::new();
         for trade in trades {
@@ -256,22 +262,24 @@ impl Database {
              FROM positions WHERE status = 'Open' ORDER BY opened_at ASC"
         ).map_err(|e| EngineError::Database(format!("Prepare failed: {}", e)))?;
 
-        let positions = stmt.query_map([], |row| {
-            Ok(Position {
-                id: row.get(0)?,
-                market_id: row.get(1)?,
-                market_question: row.get(2)?,
-                token_id: row.get(3)?,
-                side: parse_side(&row.get::<_, String>(4)?),
-                entry_price: row.get(5)?,
-                current_price: row.get(6)?,
-                size: row.get(7)?,
-                cost_basis: row.get(8)?,
-                unrealized_pnl: row.get(9)?,
-                opened_at: parse_datetime(&row.get::<_, String>(10)?),
-                status: PositionStatus::Open,
+        let positions = stmt
+            .query_map([], |row| {
+                Ok(Position {
+                    id: row.get(0)?,
+                    market_id: row.get(1)?,
+                    market_question: row.get(2)?,
+                    token_id: row.get(3)?,
+                    side: parse_side(&row.get::<_, String>(4)?),
+                    entry_price: row.get(5)?,
+                    current_price: row.get(6)?,
+                    size: row.get(7)?,
+                    cost_basis: row.get(8)?,
+                    unrealized_pnl: row.get(9)?,
+                    opened_at: parse_datetime(&row.get::<_, String>(10)?),
+                    status: PositionStatus::Open,
+                })
             })
-        }).map_err(|e| EngineError::Database(format!("Query positions failed: {}", e)))?;
+            .map_err(|e| EngineError::Database(format!("Query positions failed: {}", e)))?;
 
         let mut result = Vec::new();
         for pos in positions {
@@ -320,16 +328,17 @@ impl Database {
             "INSERT INTO engine_state (key, value, updated_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = ?3",
             params![key, value, Utc::now().to_rfc3339()],
-        ).map_err(|e| EngineError::Database(format!("Save state '{}' failed: {}", key, e)))?;
+        )
+        .map_err(|e| EngineError::Database(format!("Save state '{}' failed: {}", key, e)))?;
         Ok(())
     }
 
     /// Load a key-value pair
     pub fn load_state(&self, key: &str) -> EngineResult<Option<String>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT value FROM engine_state WHERE key = ?1"
-        ).map_err(|e| EngineError::Database(format!("Prepare failed: {}", e)))?;
+        let mut stmt = conn
+            .prepare("SELECT value FROM engine_state WHERE key = ?1")
+            .map_err(|e| EngineError::Database(format!("Prepare failed: {}", e)))?;
 
         let result = stmt.query_row(params![key], |row| row.get(0)).ok();
         Ok(result)
@@ -343,9 +352,10 @@ impl Database {
     /// Load capital on restart
     pub fn load_capital(&self) -> EngineResult<Option<f64>> {
         match self.load_state("capital")? {
-            Some(s) => s.parse().map(Some).map_err(|_| {
-                EngineError::Database("Corrupt capital value in DB".into())
-            }),
+            Some(s) => s
+                .parse()
+                .map(Some)
+                .map_err(|_| EngineError::Database("Corrupt capital value in DB".into())),
             None => Ok(None),
         }
     }
@@ -365,9 +375,9 @@ impl Database {
     /// Load portfolio stats on restart
     pub fn load_portfolio_stats(&self) -> EngineResult<Option<serde_json::Value>> {
         match self.load_state("portfolio_stats")? {
-            Some(s) => serde_json::from_str(&s).map(Some).map_err(|e| {
-                EngineError::Database(format!("Corrupt portfolio_stats: {}", e))
-            }),
+            Some(s) => serde_json::from_str(&s)
+                .map(Some)
+                .map_err(|e| EngineError::Database(format!("Corrupt portfolio_stats: {}", e))),
             None => Ok(None),
         }
     }
@@ -410,15 +420,17 @@ impl Database {
              FROM trades WHERE pnl IS NOT NULL"
         ).map_err(|e| EngineError::Database(format!("Stats query failed: {}", e)))?;
 
-        let stats = stmt.query_row([], |row| {
-            Ok(serde_json::json!({
-                "total_closed": row.get::<_, i64>(0)?,
-                "total_wins": row.get::<_, i64>(1).unwrap_or(0),
-                "total_pnl": row.get::<_, f64>(2).unwrap_or(0.0),
-                "worst_trade": row.get::<_, f64>(3).unwrap_or(0.0),
-                "best_trade": row.get::<_, f64>(4).unwrap_or(0.0),
-            }))
-        }).map_err(|e| EngineError::Database(format!("Stats query failed: {}", e)))?;
+        let stats = stmt
+            .query_row([], |row| {
+                Ok(serde_json::json!({
+                    "total_closed": row.get::<_, i64>(0)?,
+                    "total_wins": row.get::<_, i64>(1).unwrap_or(0),
+                    "total_pnl": row.get::<_, f64>(2).unwrap_or(0.0),
+                    "worst_trade": row.get::<_, f64>(3).unwrap_or(0.0),
+                    "best_trade": row.get::<_, f64>(4).unwrap_or(0.0),
+                }))
+            })
+            .map_err(|e| EngineError::Database(format!("Stats query failed: {}", e)))?;
 
         Ok(stats)
     }
@@ -428,9 +440,9 @@ impl Database {
     // ═══════════════════════════════════════════
 
     fn lock(&self) -> EngineResult<std::sync::MutexGuard<Connection>> {
-        self.conn.lock().map_err(|e| {
-            EngineError::Database(format!("DB lock poisoned: {}", e))
-        })
+        self.conn
+            .lock()
+            .map_err(|e| EngineError::Database(format!("DB lock poisoned: {}", e)))
     }
 }
 

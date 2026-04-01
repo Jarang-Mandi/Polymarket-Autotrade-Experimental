@@ -120,7 +120,9 @@ impl EngineError {
     pub fn severity(&self) -> ErrorSeverity {
         match self {
             // Retryable network issues
-            Self::Http(_) | Self::PolymarketTimeout(_) | Self::WebSocket(_) => ErrorSeverity::Retryable,
+            Self::Http(_) | Self::PolymarketTimeout(_) | Self::WebSocket(_) => {
+                ErrorSeverity::Retryable
+            }
 
             // Rate limits — back off and retry
             Self::PolymarketRateLimit { .. } => ErrorSeverity::Retryable,
@@ -165,9 +167,13 @@ impl EngineError {
 
             // Polymarket API error — depends on status
             Self::PolymarketApi { status, .. } => {
-                if *status == 429 { ErrorSeverity::Retryable }
-                else if *status >= 500 { ErrorSeverity::Retryable }
-                else { ErrorSeverity::Warning }
+                if *status == 429 {
+                    ErrorSeverity::Retryable
+                } else if *status >= 500 {
+                    ErrorSeverity::Retryable
+                } else {
+                    ErrorSeverity::Warning
+                }
             }
         }
     }
@@ -241,7 +247,9 @@ impl IntoResponse for EngineError {
     fn into_response(self) -> Response {
         let status = match &self {
             EngineError::BadRequest(_) => StatusCode::BAD_REQUEST,
-            EngineError::MarketNotFound(_) | EngineError::PositionNotFound(_) => StatusCode::NOT_FOUND,
+            EngineError::MarketNotFound(_) | EngineError::PositionNotFound(_) => {
+                StatusCode::NOT_FOUND
+            }
             EngineError::PolymarketRateLimit { .. } => StatusCode::TOO_MANY_REQUESTS,
             EngineError::InsufficientCapital { .. }
             | EngineError::PositionSizeExceeded { .. }

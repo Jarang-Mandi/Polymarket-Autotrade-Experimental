@@ -17,6 +17,9 @@ pub struct Config {
     pub max_portfolio_risk: f64,
     pub daily_api_budget: f64,
     pub min_edge_threshold: f64,
+    pub default_stop_loss_pct: f64,
+    pub default_take_profit_pct: f64,
+    pub position_auto_close_enabled: bool,
 
     // Dashboard
     pub dashboard_host: String,
@@ -41,10 +44,8 @@ impl Config {
             chain_id: env::var("POLYMARKET_CHAIN_ID")
                 .unwrap_or_else(|_| "137".into())
                 .parse()?,
-            private_key: env::var("POLYMARKET_PRIVATE_KEY")
-                .unwrap_or_else(|_| String::new()),
-            funder_address: env::var("POLYMARKET_FUNDER_ADDRESS")
-                .unwrap_or_else(|_| String::new()),
+            private_key: env::var("POLYMARKET_PRIVATE_KEY").unwrap_or_else(|_| String::new()),
+            funder_address: env::var("POLYMARKET_FUNDER_ADDRESS").unwrap_or_else(|_| String::new()),
             signature_type: env::var("POLYMARKET_SIGNATURE_TYPE")
                 .unwrap_or_else(|_| "1".into())
                 .parse()?,
@@ -64,15 +65,22 @@ impl Config {
             min_edge_threshold: env::var("MIN_EDGE_THRESHOLD")
                 .unwrap_or_else(|_| "0.08".into())
                 .parse()?,
+            default_stop_loss_pct: env::var("DEFAULT_STOP_LOSS_PCT")
+                .unwrap_or_else(|_| "15.0".into())
+                .parse()?,
+            default_take_profit_pct: env::var("DEFAULT_TAKE_PROFIT_PCT")
+                .unwrap_or_else(|_| "30.0".into())
+                .parse()?,
+            position_auto_close_enabled: env::var("POSITION_AUTO_CLOSE_ENABLED")
+                .unwrap_or_else(|_| "false".into())
+                .parse()?,
 
-            dashboard_host: env::var("DASHBOARD_HOST")
-                .unwrap_or_else(|_| "127.0.0.1".into()),
+            dashboard_host: env::var("DASHBOARD_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
             dashboard_port: env::var("DASHBOARD_PORT")
                 .unwrap_or_else(|_| "3001".into())
                 .parse()?,
 
-            db_path: env::var("DB_PATH")
-                .unwrap_or_else(|_| "data/engine.db".into()),
+            db_path: env::var("DB_PATH").unwrap_or_else(|_| "data/engine.db".into()),
 
             heartbeat_interval_secs: env::var("HEARTBEAT_INTERVAL_SECS")
                 .unwrap_or_else(|_| "30".into())
