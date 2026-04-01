@@ -157,6 +157,25 @@ impl PolymarketClient {
         }
     }
 
+    /// Get a single market by market ID
+    pub async fn get_market_by_id(&self, market_id: &str) -> EngineResult<Option<Market>> {
+        let url = format!("{}/markets", self.gamma_url);
+
+        let data = self.get_with_retry(&url, &[
+            ("id", market_id.to_string()),
+        ]).await?;
+
+        let markets = data.as_array().ok_or_else(|| {
+            EngineError::PolymarketParse("Expected array from /markets?id=".into())
+        })?;
+
+        if let Some(m) = markets.first() {
+            Ok(Some(parse_market(m)?))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Get high-volume tradeable markets
     pub async fn scan_opportunities(
         &self,

@@ -264,7 +264,7 @@ impl TradingEngine {
 
         // Read state for validation
         let state = self.state.read().await;
-        let market = state.cached_markets.iter().find(|m| m.id == cmd.market_id).cloned();
+        let mut market = state.cached_markets.iter().find(|m| m.id == cmd.market_id).cloned();
         let max_size = state.portfolio.capital * state.portfolio.agent_state.max_position_pct();
         let capital = state.portfolio.capital;
         let agent_state = state.portfolio.agent_state;
@@ -291,6 +291,19 @@ impl TradingEngine {
         let cost = actual_size * cmd.price;
 
         // Resolve market & token ID
+        // If the market is not in current cached scans (e.g. closed market replay),
+        // fetch it directly by ID from Gamma so command-driven dry-runs can proceed.
+        if market.is_none() {
+            if let Some(fetched) = self.polymarket.get_market_by_id(&cmd.market_id).await? {
+                info!("Market {} loaded directly from Gamma (not in cache)", cmd.market_id);
+                let mut state = self.state.write().await;
+                if !state.cached_markets.iter().any(|m| m.id == fetched.id) {
+                    state.cached_markets.push(fetched.clone());
+                }
+                market = Some(fetched);
+            }
+        }
+
         let market = market.ok_or_else(|| EngineError::MarketNotFound(cmd.market_id.clone()))?;
         let (yes_id, no_id) = market.token_ids()
             .ok_or_else(|| EngineError::NoTokenIds(cmd.market_id.clone()))?;
