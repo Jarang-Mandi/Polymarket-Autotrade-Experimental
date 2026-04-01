@@ -1,6 +1,5 @@
 ---
 name: polymarket-engine-integration
-version: 4.0.0
 description: Orchestrates Rust execution engine + React dashboard. OpenClaw is the brain, engine is the hands.
 metadata:
   openclaw:

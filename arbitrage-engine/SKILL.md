@@ -1,3 +1,9 @@
+---
+name: arbitrage-engine
+description: Skill module for arbitrage-engine.
+metadata: {"openclaw":{"always":true}}
+---
+
 # Arbitrage Strategy Engine
 
 ## Metadata

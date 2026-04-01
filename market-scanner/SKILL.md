@@ -1,5 +1,5 @@
 ---
-name: market_scanner
+name: market-scanner
 description: Intelligent market discovery engine yang secara proaktif mencari dan meranking peluang trading terbaik di Polymarket berdasarkan edge potential, liquidity, dan agent expertise.
 metadata: {"openclaw":{"always":true}}
 ---

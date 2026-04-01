@@ -1,5 +1,5 @@
 ---
-name: weekly_learning
+name: weekly-learning
 description: Engine pembelajaran mingguan yang mengkompilasi semua data, menganalisa performa mendalam, meretrain parameter strategi, dan menghasilkan evolution plan.
 metadata: {"openclaw":{"always":true}}
 ---

@@ -1,5 +1,5 @@
 ---
-name: news_intelligence
+name: sports-news-intel
 description: Mengumpulkan dan menganalisa berita dari SEMUA kategori (sports, politics, crypto, entertainment, science) untuk mendeteksi information edge sebelum market bereaksi. 
 metadata: {"openclaw":{"always":true}}
 ---

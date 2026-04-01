@@ -1,5 +1,5 @@
 ---
-name: activity_log
+name: activity-log
 description: Sistem logging komprehensif yang mencatat setiap keputusan, action, dan reasoning agent untuk audit trail, debugging, dan improvement.
 metadata: {"openclaw":{"always":true}}
 ---

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 
-const WS_URL = `ws://${window.location.hostname}:3001/ws`
+const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`
 const API_BASE = '/api'
 
 // Demo data for when engine is offline
@@ -115,5 +115,38 @@ export function useEngineState() {
     return () => clearInterval(interval)
   }, [fetchData])
 
-  return { state, positions, trades, markets, costs, connected, capitalHistory, arbOpportunities, arbStats }
+  const executeArb = useCallback(async (opportunityId, sizeOverride = null) => {
+    const body = {
+      opportunity_id: opportunityId,
+      size_override: sizeOverride,
+    }
+
+    const res = await fetch(`${API_BASE}/execute-arb`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+
+    const payload = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      throw new Error(payload.error?.message || payload.message || 'Failed to execute arbitrage')
+    }
+
+    await fetchData()
+    return payload
+  }, [fetchData])
+
+  return {
+    state,
+    positions,
+    trades,
+    markets,
+    costs,
+    connected,
+    capitalHistory,
+    arbOpportunities,
+    arbStats,
+    executeArb,
+    refresh: fetchData,
+  }
 }

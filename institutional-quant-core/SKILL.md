@@ -1,5 +1,5 @@
 ---
-name: polymarket_meta_knowledge
+name: institutional-quant-core
 description: Pengetahuan mendalam tentang mekanisme platform Polymarket — CLOB, settlement, fees, token mechanics, dan platform-specific strategies.
 metadata: {"openclaw":{"always":true}}
 ---

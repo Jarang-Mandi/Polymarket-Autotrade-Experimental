@@ -1,5 +1,5 @@
 ---
-name: compound_growth_engine
+name: compound-growth
 description: Strategi pertumbuhan compound dari $50 micro-bankroll — milestone tracking, reinvestment strategy, scaling rules, dan long-term trajectory management.
 metadata: {"openclaw":{"always":true}}
 ---

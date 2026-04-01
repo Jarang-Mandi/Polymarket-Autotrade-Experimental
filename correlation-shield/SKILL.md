@@ -1,5 +1,5 @@
 ---
-name: correlation_shield
+name: correlation-shield
 description: Mendeteksi dan mencegah correlated exposure antar posisi — memastikan satu event buruk tidak menghancurkan seluruh portfolio.
 metadata: {"openclaw":{"always":true}}
 ---

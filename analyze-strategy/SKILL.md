@@ -1,5 +1,5 @@
 ---
-name: analyze_strategy
+name: analyze-strategy
 description: Engine analisis multi-layer yang menggabungkan data market, top trader patterns, news intel, dan historical memory untuk menghasilkan sinyal strategis high-quality.
 metadata: {"openclaw":{"always":true}}
 ---
@@ -14,12 +14,12 @@ Ini adalah OTAK ANALISIS — menerima data mentah dan menghasilkan insight yang 
 
 ## Input Sources
 
-1. `fetch_market_data` → Market prices, orderbook, liquidity
-2. `fetch_top_traders` → Smart money positioning & patterns
-3. `sports_news_intelligence` → News & information impact
-4. `long_term_memory` → Historical patterns & lessons
-5. `market_regime_detection` → Current market conditions
-6. `bayesian_update_engine` → Updated probability estimates
+1. `fetch-market-data` → Market prices, orderbook, liquidity
+2. `fetch-top-traders` → Smart money positioning & patterns
+3. `sports-news-intel` → News & information impact
+4. `long-term-memory` → Historical patterns & lessons
+5. `market-regime` → Current market conditions
+6. `bayesian-update` → Updated probability estimates
 
 ---
 
@@ -55,7 +55,7 @@ IF info_advantage_score < min_threshold: NO TRADE
 
 ### Layer 3: Top Trader Pattern Analysis
 ```
-FROM fetch_top_traders data:
+FROM fetch-top-traders data:
 
 1. Identifikasi consensus: Are top traders aligned?
    IF 60%+ top traders on same side → strong signal
@@ -73,7 +73,7 @@ FROM fetch_top_traders data:
 
 ### Layer 4: News Impact Analysis
 ```
-FROM sports_news_intelligence (expanded to all categories):
+FROM sports-news-intel (expanded to all categories):
 
 Rate each news item:
 - Relevance to market: 0-1
@@ -168,7 +168,7 @@ IF final_score < weak_threshold → NO signal → SKIP
 
 Sebelum finalisasi signal:
 ```
-1. Query long_term_memory: Similar setups historically — how did they perform?
+1. Query long-term-memory: Similar setups historically — how did they perform?
 2. Check correlation with open positions
 3. Verify market regime allows trading
 4. Confirm no active cooldowns

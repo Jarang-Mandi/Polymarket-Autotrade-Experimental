@@ -26,7 +26,7 @@ function formatTime(iso) {
   return `${Math.floor(mins / 60)}h ago`
 }
 
-function ArbOpportunity({ opp, expanded, onToggle }) {
+function ArbOpportunity({ opp, expanded, onToggle, onExecute, executing }) {
   const Icon = TYPE_ICONS[opp.type] || Zap
   const color = TYPE_COLORS[opp.type] || 'text-gray-400'
 
@@ -47,6 +47,24 @@ function ArbOpportunity({ opp, expanded, onToggle }) {
           )}
         </div>
         <div className="flex items-center gap-4 text-xs">
+          {onExecute && (
+            <button
+              type="button"
+              disabled={executing}
+              onClick={(e) => {
+                e.stopPropagation()
+                onExecute(opp.id)
+              }}
+              className={`px-2 py-1 rounded text-[10px] font-semibold transition ${
+                executing
+                  ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
+                  : 'bg-green-900/40 text-green-300 hover:bg-green-800/40'
+              }`}
+              title="Execute this arbitrage opportunity"
+            >
+              {executing ? 'EXECUTING...' : 'EXECUTE'}
+            </button>
+          )}
           <span className="text-gray-400">{opp.legs} leg{opp.legs > 1 ? 's' : ''}</span>
           <span className="text-green-400 font-mono font-bold">
             +{opp.profit_pct.toFixed(2)}%
@@ -102,14 +120,34 @@ function ArbOpportunity({ opp, expanded, onToggle }) {
   )
 }
 
-export default function ArbitragePanel({ opportunities, arbStats }) {
+export default function ArbitragePanel({ opportunities, arbStats, executeArb }) {
   const [expandedId, setExpandedId] = useState(null)
+  const [executingId, setExecutingId] = useState(null)
+  const [actionError, setActionError] = useState('')
+  const [actionMessage, setActionMessage] = useState('')
 
   const stats = arbStats || {}
   const opps = opportunities || []
 
   const guaranteedCount = opps.filter(o => o.guaranteed).length
   const spreadCount = opps.filter(o => !o.guaranteed).length
+
+  const handleExecute = async (opportunityId) => {
+    if (!executeArb || executingId) return
+
+    setActionError('')
+    setActionMessage('')
+    setExecutingId(opportunityId)
+
+    try {
+      const resp = await executeArb(opportunityId)
+      setActionMessage(resp?.message || 'Arbitrage executed successfully')
+    } catch (err) {
+      setActionError(err?.message || 'Failed to execute arbitrage')
+    } finally {
+      setExecutingId(null)
+    }
+  }
 
   return (
     <div className="bg-[#1a1f2e] rounded-lg p-4 border border-gray-800">
@@ -135,6 +173,17 @@ export default function ArbitragePanel({ opportunities, arbStats }) {
           <span>{opps.length} found</span>
         </div>
       </div>
+
+      {actionError && (
+        <div className="mb-3 text-xs rounded bg-red-900/20 border border-red-900/40 text-red-300 px-2 py-1">
+          {actionError}
+        </div>
+      )}
+      {actionMessage && (
+        <div className="mb-3 text-xs rounded bg-green-900/20 border border-green-900/40 text-green-300 px-2 py-1">
+          {actionMessage}
+        </div>
+      )}
 
       {/* Stats bar */}
       <div className="grid grid-cols-5 gap-2 mb-3 text-xs">
@@ -190,6 +239,8 @@ export default function ArbitragePanel({ opportunities, arbStats }) {
               opp={opp}
               expanded={expandedId === opp.id}
               onToggle={() => setExpandedId(expandedId === opp.id ? null : opp.id)}
+              onExecute={executeArb ? handleExecute : null}
+              executing={executingId === opp.id}
             />
           ))}
         </div>

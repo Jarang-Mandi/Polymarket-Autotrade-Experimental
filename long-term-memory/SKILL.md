@@ -1,5 +1,5 @@
 ---
-name: long_term_memory
+name: long-term-memory
 description: Sistem memori persisten yang menyimpan semua pengalaman trading, pola market, dan lessons learned untuk mencegah kesalahan berulang dan meningkatkan keputusan.
 metadata: {"openclaw":{"always":true}}
 ---

@@ -110,14 +110,14 @@ async fn get_positions(
     State((state, _)): State<(SharedState, SharedEngine)>,
 ) -> impl IntoResponse {
     let s = state.read().await;
-    Json(&s.portfolio.positions)
+    Json(s.portfolio.positions.clone())
 }
 
 async fn get_trades(
     State((state, _)): State<(SharedState, SharedEngine)>,
 ) -> impl IntoResponse {
     let s = state.read().await;
-    Json(&s.portfolio.recent_trades)
+    Json(s.portfolio.recent_trades.clone())
 }
 
 async fn get_markets(
@@ -131,15 +131,18 @@ async fn get_markets(
         .map(|m| {
             serde_json::json!({
                 "id": m.id,
+                "condition_id": m.condition_id,
                 "question": m.question,
                 "yes_price": m.yes_price(),
                 "no_price": m.no_price(),
                 "volume_24hr": m.volume_24hr,
+                "volume_24h": m.volume_24hr,
                 "liquidity": m.liquidity,
                 "best_bid": m.best_bid,
                 "best_ask": m.best_ask,
                 "category": m.category,
                 "end_date": m.end_date,
+                "end_date_iso": m.end_date,
                 "spread": m.spread(),
             })
         })
@@ -151,7 +154,15 @@ async fn get_costs(
     State((state, _)): State<(SharedState, SharedEngine)>,
 ) -> impl IntoResponse {
     let s = state.read().await;
+    let cache_denominator = s.api_costs.total_input_tokens + s.api_costs.total_cache_read_tokens;
+    let cached_pct = if cache_denominator > 0 {
+        (s.api_costs.total_cache_read_tokens as f64 / cache_denominator as f64) * 100.0
+    } else {
+        0.0
+    };
+
     Json(serde_json::json!({
+        // Canonical keys
         "total_input_tokens": s.api_costs.total_input_tokens,
         "total_output_tokens": s.api_costs.total_output_tokens,
         "total_cache_read_tokens": s.api_costs.total_cache_read_tokens,
@@ -162,6 +173,12 @@ async fn get_costs(
         "budget_remaining": s.api_costs.budget_remaining(),
         "calls_today": s.api_costs.calls_today,
         "usage_pct": s.api_costs.usage_pct(),
+        "cached_pct": cached_pct,
+        // Backward-compatible aliases
+        "input_tokens": s.api_costs.total_input_tokens,
+        "output_tokens": s.api_costs.total_output_tokens,
+        "cache_read_tokens": s.api_costs.total_cache_read_tokens,
+        "cache_write_tokens": s.api_costs.total_cache_write_tokens,
     }))
 }
 
@@ -336,6 +353,7 @@ async fn handle_ws(socket: WebSocket, state: SharedState) {
                 consecutive_errors += 1;
                 if consecutive_errors >= 3 {
                     warn!("WS send failed {} times, closing", consecutive_errors);
+                    let _ = sender.send(Message::Close(None)).await;
                     break;
                 }
             } else {

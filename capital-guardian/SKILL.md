@@ -1,5 +1,5 @@
 ---
-name: capital_guardian
+name: capital-guardian
 description: Dedicated $50 micro-bankroll survival engine — mengelola capital preservation, compound growth strategy, dan extinction prevention dengan rules yang tidak bisa dilanggar.
 metadata: {"openclaw":{"always":true}}
 ---

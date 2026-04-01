@@ -1,5 +1,5 @@
 ---
-name: ultimate_quant_engine
+name: ultimate-quant-engine
 description: Master decision engine — menggabungkan semua quantitative signals, risk calculations, dan portfolio context menjadi satu keputusan final yang optimal.
 metadata: {"openclaw":{"always":true}}
 ---

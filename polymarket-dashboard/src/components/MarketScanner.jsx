@@ -61,13 +61,14 @@ export default function MarketScanner({ markets }) {
           </thead>
           <tbody>
             {sorted.map((m, i) => {
-              const yesPrice = m.yes_price ?? m.outcomePrices?.[0]
+              const yesPrice = m.yes_price ?? 0
               const spread = m.spread ?? 0
               const vol = m.volume_24h ?? m.volume24hr ?? 0
               const liq = m.liquidity ?? 0
 
-              const end = m.end_date_iso
-                ? new Date(m.end_date_iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+              const endDateValue = m.end_date_iso ?? m.end_date
+              const end = endDateValue
+                ? new Date(endDateValue).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
                 : '—'
 
               const priceColor = yesPrice >= 0.9 || yesPrice <= 0.1

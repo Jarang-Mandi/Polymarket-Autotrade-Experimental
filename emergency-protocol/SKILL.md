@@ -1,5 +1,5 @@
 ---
-name: emergency_protocol
+name: emergency-protocol
 description: Protokol crisis management untuk black swan events, system failures, market manipulation, dan situasi darurat lainnya yang mengancam survival agent.
 metadata: {"openclaw":{"always":true}}
 ---

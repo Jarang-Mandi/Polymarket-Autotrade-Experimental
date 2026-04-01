@@ -1,5 +1,5 @@
 ---
-name: execute_trade
+name: execute-trade
 description: Mengirim perintah eksekusi ke Polymarket CLOB API dengan slippage protection, order management, dan execution verification.
 metadata: {"openclaw":{"always":true}}
 ---

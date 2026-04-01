@@ -403,11 +403,13 @@ impl TradingEngine {
         let pos_idx = state.portfolio.positions.iter().position(|p| p.id == cmd.position_id)
             .ok_or_else(|| EngineError::PositionNotFound(cmd.position_id.clone()))?;
 
-        let pos = &mut state.portfolio.positions[pos_idx];
-        pos.status = PositionStatus::Closed;
+        let (pid, cost_basis, pnl, pnl_pct) = {
+            let pos = &mut state.portfolio.positions[pos_idx];
+            pos.status = PositionStatus::Closed;
+            (pos.id.clone(), pos.cost_basis, pos.unrealized_pnl, pos.pnl_pct())
+        };
 
-        let pnl = pos.unrealized_pnl;
-        state.portfolio.capital += pos.cost_basis + pnl;
+        state.portfolio.capital += cost_basis + pnl;
         state.portfolio.total_pnl += pnl;
         state.portfolio.daily_pnl += pnl;
 
@@ -421,8 +423,7 @@ impl TradingEngine {
                 state.portfolio.winning_trades as f64 / state.portfolio.total_trades as f64 * 100.0;
         }
 
-        let msg = format!("Closed position. PnL: ${:.4} ({:.1}%)", pnl, pos.pnl_pct());
-        let pid = pos.id.clone();
+        let msg = format!("Closed position. PnL: ${:.4} ({:.1}%)", pnl, pnl_pct);
 
         // Persist close to SQLite
         if let Err(e) = self.db.close_position(&pid, pnl) {
@@ -572,16 +573,29 @@ impl TradingEngine {
         for market in &markets {
             let (yes_id, no_id) = match market.token_ids() {
                 Some(ids) => ids,
-                None => continue,
+                None => {
+                    warn!("Skipping binary market {}: missing YES/NO token IDs", market.id);
+                    continue;
+                }
             };
 
             // Try to get real orderbook prices
             let (yes_ask, no_ask) = match self.polymarket.get_binary_prices(&yes_id, &no_id).await {
                 Ok(prices) => prices,
-                Err(_) => continue, // Skip markets with no orderbook depth
+                Err(e) => {
+                    warn!("Skipping binary market {}: orderbook unavailable ({})", market.id, e);
+                    continue;
+                } // Skip markets with no orderbook depth
             };
 
             let total_cost = yes_ask + no_ask;
+            if !total_cost.is_finite() || total_cost <= 0.0 {
+                warn!(
+                    "Skipping binary market {}: invalid total_cost {:.6}",
+                    market.id, total_cost
+                );
+                continue;
+            }
             let profit_per_unit = 1.0 - total_cost;
             let profit_pct = (profit_per_unit / total_cost) * 100.0;
 
@@ -673,7 +687,11 @@ impl TradingEngine {
             for m_raw in markets_raw {
                 let market = match crate::polymarket::parse_market(m_raw) {
                     Ok(m) => m,
-                    Err(_) => { all_ok = false; break; }
+                    Err(e) => {
+                        warn!("Skipping event {}: market parse failed ({})", slug, e);
+                        all_ok = false;
+                        break;
+                    }
                 };
 
                 if !market.enable_order_book.unwrap_or(false) {
@@ -683,13 +701,24 @@ impl TradingEngine {
 
                 let (yes_id, _no_id) = match market.token_ids() {
                     Some(ids) => ids,
-                    None => { all_ok = false; break; }
+                    None => {
+                        warn!("Skipping event {} market {}: missing token IDs", slug, market.id);
+                        all_ok = false;
+                        break;
+                    }
                 };
 
                 // Get actual orderbook ask price
                 let (ask_price, _depth) = match self.polymarket.get_ask_depth(&yes_id).await {
                     Ok(d) => d,
-                    Err(_) => { all_ok = false; break; }
+                    Err(e) => {
+                        warn!(
+                            "Skipping event {} market {}: ask depth unavailable ({})",
+                            slug, market.id, e
+                        );
+                        all_ok = false;
+                        break;
+                    }
                 };
 
                 let liq = market.liquidity.unwrap_or(0.0);
@@ -713,6 +742,14 @@ impl TradingEngine {
             }
 
             if !all_ok || legs.len() < 2 {
+                continue;
+            }
+
+            if !sum_yes_asks.is_finite() || sum_yes_asks <= 0.0 || !min_liquidity_leg.is_finite() {
+                warn!(
+                    "Skipping event {}: invalid aggregate values (sum_yes_asks={:.6}, min_liquidity_leg={:.2})",
+                    slug, sum_yes_asks, min_liquidity_leg
+                );
                 continue;
             }
 
@@ -843,7 +880,7 @@ impl TradingEngine {
     pub async fn handle_execute_arb(&self, cmd: ExecuteArbCommand) -> EngineResult<ArbExecutionResponse> {
         info!("ARB EXECUTE: {}", cmd.opportunity_id);
 
-        let (opp, config) = {
+        let (opp, config, capital) = {
             let state = self.state.read().await;
 
             let opp = state.arb_opportunities
@@ -854,28 +891,31 @@ impl TradingEngine {
                     format!("Arb opportunity {} not found", cmd.opportunity_id)
                 ))?;
 
-            if state.active_arb_count >= state.arb_config.max_concurrent_arbs {
-                return Err(EngineError::BadRequest(
-                    format!("Max concurrent arbs ({}) reached", state.arb_config.max_concurrent_arbs)
-                ));
+            if opp.status != ArbStatus::Detected {
+                return Err(EngineError::BadRequest(format!(
+                    "Arb opportunity {} is not executable (status: {:?})",
+                    cmd.opportunity_id, opp.status
+                )));
             }
 
-            (opp, state.arb_config.clone())
-        };
-
-        // Calculate actual size based on bankroll and config
-        let capital = {
-            let state = self.state.read().await;
-            state.portfolio.capital
+            (opp, state.arb_config.clone(), state.portfolio.capital)
         };
 
         let max_affordable = capital * 0.8; // never use more than 80% of capital
         let unit_cost = opp.total_cost;
-        if unit_cost <= 0.0 {
+        if unit_cost <= 0.0 || !unit_cost.is_finite() {
             return Err(EngineError::BadRequest("Invalid arb cost".into()));
+        }
+        if opp.legs.is_empty() {
+            return Err(EngineError::BadRequest("Arb opportunity has no legs".into()));
         }
 
         let max_units = (max_affordable / unit_cost).floor().min(config.max_arb_size / unit_cost);
+        if !max_units.is_finite() || max_units <= 0.0 {
+            return Err(EngineError::BadRequest(
+                "Insufficient capital for arb minimum unit".into(),
+            ));
+        }
         let actual_units = cmd.size_override
             .map(|s| s.min(max_units).max(1.0))
             .unwrap_or_else(|| max_units.min(5.0).max(1.0)); // default: up to $5 worth
@@ -883,12 +923,45 @@ impl TradingEngine {
         let total_cost = actual_units * unit_cost;
         let expected_profit = actual_units * opp.profit;
 
+        if !total_cost.is_finite() || total_cost <= 0.0 {
+            return Err(EngineError::BadRequest("Invalid computed arb total_cost".into()));
+        }
+
         if total_cost > capital * 0.95 {
             return Err(EngineError::InsufficientCapital {
                 cost: total_cost,
                 capital,
                 pct: 95.0,
             });
+        }
+
+        // Reserve a concurrency slot and transition to executing.
+        {
+            let mut state = self.state.write().await;
+
+            if state.active_arb_count >= state.arb_config.max_concurrent_arbs {
+                return Err(EngineError::BadRequest(
+                    format!("Max concurrent arbs ({}) reached", state.arb_config.max_concurrent_arbs)
+                ));
+            }
+
+            let opp_mut = state
+                .arb_opportunities
+                .iter_mut()
+                .find(|o| o.id == cmd.opportunity_id)
+                .ok_or_else(|| EngineError::BadRequest(
+                    format!("Arb opportunity {} no longer available", cmd.opportunity_id)
+                ))?;
+
+            if opp_mut.status != ArbStatus::Detected {
+                return Err(EngineError::BadRequest(format!(
+                    "Arb opportunity {} is no longer executable (status: {:?})",
+                    cmd.opportunity_id, opp_mut.status
+                )));
+            }
+
+            opp_mut.status = ArbStatus::Executing;
+            state.active_arb_count += 1;
         }
 
         // Execute each leg
@@ -951,19 +1024,18 @@ impl TradingEngine {
         // Update capital and stats
         {
             let mut state = self.state.write().await;
+
             if all_filled {
                 state.portfolio.capital -= total_cost;
                 state.arb_stats.opportunities_executed += 1;
                 state.arb_stats.total_profit += expected_profit;
-                state.active_arb_count += 1;
+                let n = state.arb_stats.opportunities_executed as f64;
+                state.arb_stats.avg_profit_pct = if n <= 1.0 {
+                    opp.profit_pct
+                } else {
+                    ((state.arb_stats.avg_profit_pct * (n - 1.0)) + opp.profit_pct) / n
+                };
 
-                // Update avg profit pct
-                if state.arb_stats.opportunities_executed > 0 {
-                    state.arb_stats.avg_profit_pct =
-                        state.arb_stats.total_profit / state.arb_stats.opportunities_executed as f64;
-                }
-
-                // Mark opportunity as executing
                 if let Some(o) = state.arb_opportunities.iter_mut().find(|o| o.id == cmd.opportunity_id) {
                     o.status = ArbStatus::Filled;
                 }
@@ -982,6 +1054,15 @@ impl TradingEngine {
                 }
             }
 
+            // Release concurrency slot.
+            state.active_arb_count = state.active_arb_count.saturating_sub(1);
+
+            // Keep active detections only; executed terminal states are ephemeral and
+            // should not block future opportunities.
+            state
+                .arb_opportunities
+                .retain(|o| matches!(o.status, ArbStatus::Detected | ArbStatus::Executing));
+
             state.last_command = Some(Utc::now());
 
             if let Err(e) = self.db.save_capital(state.portfolio.capital) {
@@ -994,10 +1075,15 @@ impl TradingEngine {
                 "Arb executed: {} legs filled, cost=${:.4}, expected profit=${:.4} ({:.2}%)",
                 legs_filled, total_cost, expected_profit, opp.profit_pct
             )
-        } else {
+        } else if legs_filled > 0 {
             format!(
                 "Arb partial: {}/{} legs filled ({})",
                 legs_filled, opp.legs.len(), opp.arb_type.label()
+            )
+        } else {
+            format!(
+                "Arb failed: 0/{} legs filled ({})",
+                opp.legs.len(), opp.arb_type.label()
             )
         };
 
@@ -1026,9 +1112,9 @@ impl TradingEngine {
             return;
         }
 
-        let mut positions_to_close = vec![];
+        let mut positions_to_close: Vec<String> = vec![];
 
-        for (i, pos) in state.portfolio.positions.iter_mut().enumerate() {
+        for pos in &mut state.portfolio.positions {
             if pos.status != PositionStatus::Open {
                 continue;
             }
@@ -1042,20 +1128,27 @@ impl TradingEngine {
             let pnl_pct = pos.pnl_pct();
             if pnl_pct <= -15.0 {
                 info!("STOP LOSS triggered: {} ({:.1}%)", pos.id, pnl_pct);
-                positions_to_close.push(i);
+                positions_to_close.push(pos.id.clone());
             } else if pnl_pct >= 30.0 {
                 info!("TAKE PROFIT triggered: {} ({:.1}%)", pos.id, pnl_pct);
-                positions_to_close.push(i);
+                positions_to_close.push(pos.id.clone());
             }
         }
 
-        for &i in positions_to_close.iter().rev() {
-            if i < state.portfolio.positions.len() {
-                let pos = &mut state.portfolio.positions[i];
-                pos.status = PositionStatus::Closed;
+        for close_id in &positions_to_close {
+            if let Some(pos_idx) = state
+                .portfolio
+                .positions
+                .iter()
+                .position(|p| p.id == *close_id && p.status == PositionStatus::Open)
+            {
+                let (pid, cost_basis, pnl) = {
+                    let pos = &mut state.portfolio.positions[pos_idx];
+                    pos.status = PositionStatus::Closed;
+                    (pos.id.clone(), pos.cost_basis, pos.unrealized_pnl)
+                };
 
-                let pnl = pos.unrealized_pnl;
-                state.portfolio.capital += pos.cost_basis + pnl;
+                state.portfolio.capital += cost_basis + pnl;
                 state.portfolio.total_pnl += pnl;
                 state.portfolio.daily_pnl += pnl;
 
@@ -1070,7 +1163,7 @@ impl TradingEngine {
                 }
 
                 // Persist auto-close to SQLite
-                if let Err(e) = self.db.close_position(&pos.id, pnl) {
+                if let Err(e) = self.db.close_position(&pid, pnl) {
                     warn!("DB close_position (auto) failed: {}", e);
                 }
             }

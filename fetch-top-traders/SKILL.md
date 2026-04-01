@@ -1,5 +1,5 @@
 ---
-name: fetch_top_traders
+name: fetch-top-traders
 description: Mengambil dan menganalisa data top traders dari Polymarket untuk smart money intelligence dan pattern detection.
 metadata: {"openclaw":{"always":true}}
 ---

@@ -1,5 +1,5 @@
 ---
-name: risk_allocation
+name: risk-allocation
 description: Risk manager utama — mengatur exposure, position sizing, stop-loss, survival logic, dan daily risk budget untuk $50 micro-bankroll.
 metadata: {"openclaw":{"always":true}}
 ---

@@ -1,5 +1,5 @@
 ---
-name: position_exit_engine
+name: position-exit-engine
 description: Engine khusus untuk mengelola exit dari posisi — profit taking, cut loss, time-based exit, dan information-based exit untuk binary Polymarket outcomes.
 metadata: {"openclaw":{"always":true}}
 ---

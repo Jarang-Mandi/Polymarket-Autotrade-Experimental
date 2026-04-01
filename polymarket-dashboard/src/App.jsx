@@ -10,7 +10,18 @@ import AgentStatus from './components/AgentStatus'
 import ArbitragePanel from './components/ArbitragePanel'
 
 export default function App() {
-  const { state, positions, trades, markets, costs, connected, capitalHistory, arbOpportunities, arbStats } = useEngineState()
+  const {
+    state,
+    positions,
+    trades,
+    markets,
+    costs,
+    connected,
+    capitalHistory,
+    arbOpportunities,
+    arbStats,
+    executeArb,
+  } = useEngineState()
 
   return (
     <div className="min-h-screen bg-[#0a0e17] p-4">
@@ -27,7 +38,11 @@ export default function App() {
         </div>
 
         {/* Arbitrage Scanner — prominent placement */}
-        <ArbitragePanel opportunities={arbOpportunities} arbStats={arbStats} />
+        <ArbitragePanel
+          opportunities={arbOpportunities}
+          arbStats={arbStats}
+          executeArb={executeArb}
+        />
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <PositionsTable positions={positions} />

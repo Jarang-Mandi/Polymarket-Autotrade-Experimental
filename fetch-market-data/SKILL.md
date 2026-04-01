@@ -1,5 +1,5 @@
 ---
-name: fetch_market_data
+name: fetch-market-data
 description: Mengambil dan menormalisasi data market dari Polymarket CLOB API termasuk harga, orderbook, volume, liquidity metrics, dan event metadata.
 metadata: {"openclaw":{"always":true}}
 ---

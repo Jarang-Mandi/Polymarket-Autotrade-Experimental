@@ -1,5 +1,5 @@
 ---
-name: quantitative_risk_engine
+name: quant-risk-engine
 description: Pure risk calculator — menghitung Risk of Ruin, survival probability via Monte Carlo simulation, dan worst-case scenarios untuk setiap trade dan portfolio.
 metadata: {"openclaw":{"always":true}}
 ---

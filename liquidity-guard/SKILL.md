@@ -1,5 +1,5 @@
 ---
-name: liquidity_guard
+name: liquidity-guard
 description: Menganalisa likuiditas market sebelum trading untuk mencegah slippage, stuck positions, dan execution problems yang bisa menghancurkan micro-bankroll.
 metadata: {"openclaw":{"always":true}}
 ---

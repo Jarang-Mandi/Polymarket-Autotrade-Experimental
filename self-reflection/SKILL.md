@@ -1,5 +1,5 @@
 ---
-name: self_reflection
+name: self-reflection
 description: Engine evaluasi diri yang menganalisa performa, mendeteksi pola kesalahan, dan mengadaptasi strategi untuk peningkatan berkelanjutan.
 metadata: {"openclaw":{"always":true}}
 ---

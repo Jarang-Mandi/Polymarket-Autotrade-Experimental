@@ -1,5 +1,5 @@
 ---
-name: bayesian_update_engine
+name: bayesian-update
 description: Engine probabilistik yang mengupdate estimasi agent secara rasional menggunakan Bayesian inference multi-source dengan calibration tracking.
 metadata: {"openclaw":{"always":true}}
 ---

@@ -1,5 +1,5 @@
 ---
-name: portfolio_optimizer
+name: hedge-fund-optimizer
 description: Multi-position portfolio management — mengoptimalkan alokasi, diversifikasi, correlation management, dan rebalancing untuk survival-first portfolio.
 metadata: {"openclaw":{"always":true}}
 ---

@@ -1,5 +1,5 @@
 ---
-name: wallet_tracker
+name: wallet-tracker
 description: Sistem monitoring real-time untuk wallet balance, open positions, PnL tracking, fee tracking, dan portfolio health dashboard.
 metadata: {"openclaw":{"always":true}}
 ---

@@ -1,5 +1,5 @@
 ---
-name: autonomous_strategy_engine
+name: autonomous-strategy
 description: Otak utama agent — menghasilkan strategi trading mandiri berdasarkan multi-source data, probabilistic reasoning, dan survival-first logic untuk Polymarket.
 metadata: {"openclaw":{"always":true}}
 ---

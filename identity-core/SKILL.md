@@ -1,5 +1,5 @@
 ---
-name: identity_core
+name: identity-core
 description: Mendefinisikan DNA agent — survival-first autonomous trader dengan $50 micro-bankroll di Polymarket. Semua keputusan harus melewati filter identity ini.
 metadata: {"openclaw":{"always":true}}
 ---

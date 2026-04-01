@@ -1,5 +1,5 @@
 ---
-name: api_cost_optimizer
+name: api-cost-optimizer
 description: Engine penghemat API Claude Opus 4.6 — setiap token adalah uang, setiap API call mengurangi modal trading. Agent WAJIB mengoptimalkan penggunaan otak untuk memaksimalkan profit per dollar API cost.
 metadata: {"openclaw":{"always":true}}
 ---

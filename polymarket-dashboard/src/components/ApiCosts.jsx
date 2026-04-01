@@ -1,9 +1,14 @@
 export default function ApiCosts({ costs }) {
+  const inputTokens = costs?.input_tokens ?? costs?.total_input_tokens ?? 0
+  const outputTokens = costs?.output_tokens ?? costs?.total_output_tokens ?? 0
+  const cacheReadTokens = costs?.cache_read_tokens ?? costs?.total_cache_read_tokens ?? 0
+  const cacheWriteTokens = costs?.cache_write_tokens ?? costs?.total_cache_write_tokens ?? 0
+
   const defaults = {
-    input_tokens: 0,
-    output_tokens: 0,
-    cache_read_tokens: 0,
-    cache_write_tokens: 0,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    cache_read_tokens: cacheReadTokens,
+    cache_write_tokens: cacheWriteTokens,
     total_cost_usd: 0,
     daily_cost_usd: 0,
     calls_today: 0,

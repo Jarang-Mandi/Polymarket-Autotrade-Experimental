@@ -1,5 +1,5 @@
 ---
-name: market_regime_detection
+name: market-regime
 description: Mengidentifikasi kondisi pasar secara real-time untuk mengatur strategi dan exposure secara adaptif — termasuk Polymarket-specific regime detection.
 metadata: {"openclaw":{"always":true}}
 ---

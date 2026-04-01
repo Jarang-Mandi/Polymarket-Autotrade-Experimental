@@ -1,5 +1,5 @@
 ---
-name: reinforcement_survival_engine
+name: reinforcement-survival
 description: Self-improving engine yang menggunakan reward-based evaluation untuk mengoptimalkan survival probability dan risk-adjusted returns dari setiap keputusan.
 metadata: {"openclaw":{"always":true}}
 ---
